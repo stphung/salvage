@@ -612,7 +612,9 @@ if [[ -n $json_path ]]; then
               empty:      $empty,
               symlinks:   $symlinks
             },
-            bytes_at_risk: (if $have_sizes then ($sz | add // 0) else null end),
+            bytes_at_risk: (if ($r.unmatched | length) == 0 then 0
+                            elif $have_sizes then ($sz | add // 0)
+                            else null end),
             unmatched: ($r.unmatched | to_entries
                         | map({ path: .value,
                                 size: (if $have_sizes then $sz[.key] else null end) }))

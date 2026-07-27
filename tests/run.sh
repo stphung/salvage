@@ -358,6 +358,251 @@ expect_contains "17b comparison method is stated" "paranoid" "$err"
 teardown
 
 # ---------------------------------------------------------------------------
+# 18. Matching is by content, not by size. rmlint groups candidates by size
+#     first, so same-size-different-content is the case that would expose a
+#     false match — the only error mode here that loses data.
+# ---------------------------------------------------------------------------
+setup
+printf 'AAAA' > "$target/a"
+printf 'BBBB' > "$ref/b"
+run "$target" -r "$ref"
+expect_eq "18a same size, different content is not a match" "a" "$out"
+printf 'AAAA' > "$ref/c"
+run "$target" -r "$ref"
+expect_eq "18b same size, same content is a match" "" "$out"
+teardown
+
+# ---------------------------------------------------------------------------
+# 19. Duplicates within the target itself
+# ---------------------------------------------------------------------------
+setup
+printf 'twinned' > "$target/one"
+printf 'twinned' > "$target/two"
+run "$target" -r "$ref"
+expect_eq "19a intra-target duplicates with no reference: both reported" "one
+two" "$out"
+printf 'twinned' > "$ref/single-copy"
+run "$target" -r "$ref"
+expect_eq "19b one reference copy covers both target copies" "" "$out"
+teardown
+
+# ---------------------------------------------------------------------------
+# 20. The question is one-directional: reference-only files are never reported
+# ---------------------------------------------------------------------------
+setup
+printf 'shared' > "$target/t"
+printf 'shared' > "$ref/r"
+printf 'reference has extra content' > "$ref/extra-1"
+mkdir -p "$ref/whole/extra/tree"
+printf 'more' > "$ref/whole/extra/tree/file"
+run "$target" -r "$ref"
+expect_eq "20a reference-only files are not reported" "" "$out"
+expect_status "20b reference-only files do not affect the exit code" 0
+expect_not_contains "20c reference-only names never appear" "extra-1" "$err"
+teardown
+
+# ---------------------------------------------------------------------------
+# 21. Degenerate trees
+# ---------------------------------------------------------------------------
+setup
+run "$target" -r "$ref"
+expect_status "21a empty target is fully covered" 0
+expect_contains "21b empty target says so" "No files to compare" "$err"
+printf 'orphan' > "$target/lonely"
+run "$target" -r "$ref"
+expect_eq "21c empty reference leaves everything unmatched" "lonely" "$out"
+expect_status "21d empty reference exits 1" 1
+teardown
+setup
+: > "$target/nothing"
+ln -s nothing "$target/pointer"
+run "$target" -r "$ref"
+expect_status "21e target of only empty files and symlinks is covered" 0
+expect_contains "21f and says nothing was comparable" "No files to compare" "$err"
+teardown
+
+# ---------------------------------------------------------------------------
+# 22. Recursion depth — the tool must reach the bottom of a deep tree
+# ---------------------------------------------------------------------------
+setup
+deep="a/b/c/d/e/f/g/h/i/j/k/l"
+mkdir -p "$target/$deep" "$ref/somewhere/else"
+printf 'buried treasure' > "$target/$deep/found.txt"
+printf 'buried treasure' > "$ref/somewhere/else/renamed.txt"
+printf 'buried and lost'  > "$target/$deep/lost.txt"
+run "$target" -r "$ref"
+expect_eq "22a depth-12 match found regardless of path" "$deep/lost.txt" "$out"
+expect_contains "22b deep directory appears in the rollup" "$deep/" "$err"
+teardown
+
+# ---------------------------------------------------------------------------
+# 23. Hardlinks — two paths, one inode, both must be accounted for
+# ---------------------------------------------------------------------------
+setup
+printf 'linked content' > "$target/original"
+ln "$target/original" "$target/hardlink"
+run "$target" -r "$ref"
+expect_eq "23a both hardlink paths reported when unmatched" "hardlink
+original" "$out"
+printf 'linked content' > "$ref/copy"
+run "$target" -r "$ref"
+expect_eq "23b both hardlink paths matched by one reference copy" "" "$out"
+teardown
+
+# ---------------------------------------------------------------------------
+# 24. Filenames that break naive shell code
+# ---------------------------------------------------------------------------
+setup
+names=(
+    "plain.txt"
+    "with spaces.txt"
+    "it's a \"quoted\" file.txt"
+    "back\\slash.txt"
+    "percent-%s-format.txt"
+    "dollar\$sign.txt"
+    "café-unicode.txt"
+    "日本語.txt"
+    "trailing.space .txt"
+    "-leading-dash.txt"
+    "semi;colon&amp.txt"
+)
+for n in "${names[@]}"; do printf 'unique-%s' "$n" > "$target/$n"; done
+count=$("$SALVAGE" "$target" -r "$ref" --print0 2>/dev/null | LC_ALL=C tr -dc '\0' | LC_ALL=C wc -c | tr -d ' ')
+expect_eq "24a every exotic filename is reported" "${#names[@]}" "$count"
+run "$target" -r "$ref"
+for n in "${names[@]}"; do
+    expect_contains "24b reported verbatim: $n" "$n" "$out"
+done
+teardown
+
+# ---------------------------------------------------------------------------
+# 25. Argument path forms
+# ---------------------------------------------------------------------------
+setup
+printf 'x' > "$target/f"
+run "$target/" -r "$ref/"
+expect_eq "25a trailing slashes on arguments" "f" "$out"
+( cd "$work" && "$SALVAGE" target -r ref >"$work/rel.out" 2>/dev/null )
+expect_eq "25b relative path arguments" "f" "$(cat "$work/rel.out")"
+ln -s "$target" "$work/target-link"
+run "$work/target-link" -r "$ref"
+expect_eq "25c symlinked directory as target" "f" "$out"
+run "$target" -r "$ref" -r "$ref"
+expect_eq "25d the same reference given twice is harmless" "f" "$out"
+run -r "$ref" -- "$target"
+expect_eq "25e -- terminates option parsing" "f" "$out"
+teardown
+
+# ---------------------------------------------------------------------------
+# 26. An I/O failure must never look like a clean bill of health
+# ---------------------------------------------------------------------------
+setup
+printf 'readable' > "$target/fine.txt"
+printf 'readable' > "$ref/fine.txt"
+mkdir -p "$target/locked"
+printf 'unreadable' > "$target/locked/secret"
+chmod 000 "$target/locked"
+run "$target" -r "$ref"
+chmod 755 "$target/locked"
+expect_status "26a unreadable directory exits 2, not 0" 2
+expect_contains "26b and explains that coverage is unverified" "coverage cannot be verified" "$err"
+expect_eq "26c and emits no manifest" "" "$out"
+teardown
+
+# ---------------------------------------------------------------------------
+# 27. Determinism
+# ---------------------------------------------------------------------------
+setup
+for n in zebra alpha Mike 10-ten 2-two _under; do printf 'v-%s' "$n" > "$target/$n"; done
+run "$target" -r "$ref"; first=$out
+run "$target" -r "$ref"; second=$out
+expect_eq "27a repeated runs agree" "$first" "$second"
+expect_eq "27b stdout is sorted" "$(printf '%s\n' "$first" | LC_ALL=C sort)" "$first"
+teardown
+
+# ---------------------------------------------------------------------------
+# 28. Scale — xargs batches the stat call, and misaligned batches would
+#     silently attach the wrong size to the wrong file
+# ---------------------------------------------------------------------------
+setup
+n=2500
+i=0
+while [[ $i -lt $n ]]; do printf 'payload-%s' "$i" > "$target/f$i"; i=$((i + 1)); done
+printf 'payload-7' > "$ref/one-match"
+run "$target" -r "$ref" --json "$work/scale.json"
+expect_status "28a scale run exits 1" 1
+expect_eq "28b every file accounted for" "$((n - 1))" "$(jq -r '.counts.unmatched' "$work/scale.json")"
+expect_eq "28c the single match is found" "1" "$(jq -r '.counts.matched' "$work/scale.json")"
+expected_bytes=0
+i=0
+while [[ $i -lt $n ]]; do
+    [[ $i -eq 7 ]] || expected_bytes=$((expected_bytes + ${#i} + 8))
+    i=$((i + 1))
+done
+expect_eq "28d sizes stay aligned across xargs batches" \
+    "$expected_bytes" "$(jq -r '.bytes_at_risk' "$work/scale.json")"
+expect_eq "28e no file is missing a size" "0" \
+    "$(jq -r '[.unmatched[] | select(.size == null)] | length' "$work/scale.json")"
+teardown
+
+# ---------------------------------------------------------------------------
+# 29. Structured report for the covered case
+# ---------------------------------------------------------------------------
+setup
+printf 'covered' > "$target/f"
+printf 'covered' > "$ref/g"
+run "$target" -r "$ref" --json "$work/covered.json"
+expect_eq "29a covered report lists nothing" "0" "$(jq -r '.unmatched | length' "$work/covered.json")"
+expect_eq "29b covered report has zero bytes at risk" "0" "$(jq -r '.bytes_at_risk' "$work/covered.json")"
+expect_eq "29c report records the comparison method" "blake2b" "$(jq -r '.comparison' "$work/covered.json")"
+expect_eq "29d report records every reference" "1" "$(jq -r '.references | length' "$work/covered.json")"
+teardown
+
+# ---------------------------------------------------------------------------
+# 30. --save-scan output is genuinely replayable
+# ---------------------------------------------------------------------------
+setup
+printf 'matched' > "$target/m"; printf 'matched' > "$ref/m2"
+printf 'missing' > "$target/x"
+run "$target" -r "$ref" --save-scan "$work/scan.json"
+if rmlint --replay "$work/scan.json" -o "json:$work/replayed.json" >/dev/null 2>&1 \
+   && jq -e 'type == "array"' "$work/replayed.json" >/dev/null 2>&1; then
+    ok "30a rmlint --replay accepts the saved scan"
+else
+    no "30a rmlint --replay accepts the saved scan" "replay failed"
+fi
+teardown
+
+# ---------------------------------------------------------------------------
+# 31. No escape sequences leak into a non-terminal
+# ---------------------------------------------------------------------------
+setup
+printf 'x' > "$target/f"
+run "$target" -r "$ref"
+esc=$(printf '\033')
+expect_not_contains "31a no ANSI on stderr when not a terminal" "$esc" "$err"
+expect_not_contains "31b no ANSI on stdout" "$esc" "$out"
+run "$target" -r "$ref" --no-color
+expect_not_contains "31c --no-color is clean too" "$esc" "$err"
+teardown
+
+# ---------------------------------------------------------------------------
+# 32. Optional lint
+# ---------------------------------------------------------------------------
+if command -v shellcheck >/dev/null 2>&1; then
+    lint_out=$(mktemp)
+    shellcheck -S warning "$SALVAGE" "$0" >"$lint_out" 2>&1 || true
+    if [[ -s $lint_out ]]; then
+        no "32a shellcheck reports no warnings" "$(cat "$lint_out")"
+    else
+        ok "32a shellcheck reports no warnings"
+    fi
+    rm -f "$lint_out"
+else
+    printf '%s  skip  32a shellcheck not installed%s\n' "$D" "$Z"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [[ $fail -eq 0 ]]; then
     printf '%s%d passed, 0 failed%s\n' "$G" "$pass" "$Z"

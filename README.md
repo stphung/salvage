@@ -157,13 +157,20 @@ salvage examples/project -r examples/backup
 ## Development
 
 ```sh
-tests/run.sh        # 59 assertions, generated fixtures
+tests/run.sh        # 111 assertions, generated fixtures, ~16s
 tests/run.sh -v     # show each one
 ```
 
 Fixtures are generated rather than committed: empty files, symlinks and
 newline-in-name files don't survive git or a zip faithfully, and the code that builds
 each case documents the case.
+
+The suite leans hardest on the cases where a wrong answer would cost data rather than
+time — same-size-different-content (the shape a false match would take), unreadable
+files exiting 2 rather than 0, hardlinks and intra-target duplicates being fully
+accounted for, and a 2,500-file run that checks sizes stay aligned with paths across
+`xargs` batch boundaries. `shellcheck` runs as part of the suite if it's installed and
+is skipped if not.
 
 `examples/project` and `examples/backup` are a hand-inspectable demo — a small Rust
 project partially backed up, with a moved file, a renamed file, changed content and
