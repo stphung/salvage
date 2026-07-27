@@ -92,7 +92,8 @@ jobs:
 
           Verify downloads with \`shasum -a 256 -c SHA256SUMS\`.
 
-          Tested on macOS (BSD userland, bash 3.2) and Linux (GNU userland).
+          Built and tested on macOS (BSD userland, bash 3.2). Linux is not
+          covered by CI; the GNU \`stat\` path is exercised by a test shim only.
           NOTES
 
       - name: Publish

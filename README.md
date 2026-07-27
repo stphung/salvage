@@ -284,9 +284,13 @@ several files missing entirely.
 
 ### Releasing
 
-CI runs the suite on macOS and Linux for every push. The Linux job matters
-disproportionately: it is the only place the GNU `stat` branch and GNU `find`/`sed`
-run for real rather than behind the shim in test group 33.
+CI runs the suite on macOS for every push.
+
+A Linux job was tried and removed: dependencies installed and the version check
+passed, but the suite then hung with no output and was cancelled after 15 minutes.
+The cause is unidentified. So the GNU `stat` branch is currently covered only by the
+shim in test group 33 — that proves the branch is selected and returns correct sizes,
+but not that a real GNU userland behaves as assumed.
 
 To cut a release, bump the version in **two** places — `VERSION=` in `salvage` and the
 `.TH` line of `doc/salvage.1` — then tag:

@@ -28,9 +28,13 @@ make dist           # release artifacts into dist/
 bash -n salvage     # syntax check without executing
 ```
 
-CI (`.github/workflows/ci.yml`) runs the suite on macOS **and Linux**. The Linux job
-is not redundant: it is the only place the GNU `stat -c` branch and GNU `find`/`sed`
-execute for real rather than behind the shim in test group 33. The shellcheck job is
+CI (`.github/workflows/ci.yml`) runs the suite on **macOS only**. A Linux job was
+tried and removed: rmlint/jq installed and `make check-version` passed, then the suite
+hung with no output and was cancelled after 15 minutes. **The cause was never
+identified.** Before adding Linux back, reproduce that hang locally in a container or
+VM — re-running CI and hoping is not diagnosis. Consequence: the GNU `stat -c` branch
+is exercised only by the shim in group 33, so GNU `find`/`sed`/`xargs` behaviour is
+assumed, not verified. The shellcheck job is
 deliberately `continue-on-error` — shellcheck has never been run against this
 codebase, so it is advisory until someone triages the findings and removes that line.
 
