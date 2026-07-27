@@ -13,7 +13,9 @@ ZSHDIR   = $(DESTDIR)$(PREFIX)/share/zsh/site-functions
 BASHDIR  = $(DESTDIR)$(PREFIX)/share/bash-completion/completions
 
 .DEFAULT_GOAL := help
-.PHONY: help install uninstall link unlink test lint deps demo
+.PHONY: help install uninstall link unlink test list-tests lint deps demo
+
+T ?=
 
 help: ## Show this help
 	@printf 'salvage — targets\n\n'
@@ -52,8 +54,11 @@ link: ## Symlink salvage into PREFIX/bin for development
 unlink: ## Remove the development symlink
 	rm -f $(BINDIR)/salvage
 
-test: ## Run the test suite
-	@./tests/run.sh
+test: ## Run the test suite (T="5 22" or T="-k newline" to select)
+	@./tests/run.sh $(T)
+
+list-tests: ## List the test groups
+	@./tests/run.sh -l
 
 lint: ## Run shellcheck if installed
 	@command -v shellcheck >/dev/null 2>&1 \

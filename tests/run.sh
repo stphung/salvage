@@ -4,13 +4,41 @@
 # files, symlinks and newline-in-name files do not survive git or a zip
 # faithfully, and the code that builds each case documents the case.
 #
-# Usage: tests/run.sh [-v]
+# Each numbered group is a function named test_<NN>_<slug>. The runner at the
+# bottom discovers them with `declare -F`, which sorts alphabetically, so the
+# zero-padded prefix gives run order with no registry to keep in sync.
+#
+# Usage:
+#   tests/run.sh                 run everything
+#   tests/run.sh 5               run group 5
+#   tests/run.sh 5 22 26         run several
+#   tests/run.sh -k newline      run groups whose name matches a substring
+#   tests/run.sh -l              list the groups
+#   tests/run.sh -v              print passing assertions too
 
 set -uo pipefail
 
 SALVAGE=$(cd -- "$(dirname -- "$0")/.." && pwd)/salvage
 VERBOSE=false
-[[ ${1:-} == "-v" ]] && VERBOSE=true
+LIST=false
+pattern=""
+nums=""
+
+usage() {
+    sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose) VERBOSE=true; shift ;;
+        -l|--list)    LIST=true; shift ;;
+        -k)           [[ $# -ge 2 ]] || { echo "-k needs a pattern" >&2; exit 2; }
+                      pattern=$2; shift 2 ;;
+        -h|--help)    usage; exit 0 ;;
+        [0-9]*)       nums="$nums $1"; shift ;;
+        *)            printf 'unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
 
 pass=0
 fail=0
@@ -85,11 +113,9 @@ actual: $hay" ;;
     esac
 }
 
-printf 'running salvage tests\n\n'
 
-# ---------------------------------------------------------------------------
 # 1. Content match ignores name and path
-# ---------------------------------------------------------------------------
+test_01_content_match() {
 setup
 printf 'shared payload' > "$target/deep-name.txt"
 mkdir -p "$ref/some/other/place"
@@ -99,10 +125,10 @@ run "$target" -r "$ref"
 expect_eq "1a content match ignores name and path" "unique.txt" "$out"
 expect_status "1b exit 1 when something is unmatched" 1
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 2. Hidden files are compared (regression: rmlint skips them by default)
-# ---------------------------------------------------------------------------
+test_02_hidden_files_are_compared() {
 setup
 printf 'secret config' > "$target/.env"
 printf 'secret config' > "$ref/.env"
@@ -117,10 +143,10 @@ expect_eq "2c hidden file absent from reference is reported" ".env.local" "$out"
 run "$target" -r "$ref" --exclude-hidden
 expect_eq "2d --exclude-hidden skips dotfiles" "" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 3. Empty files (rmlint classifies these as 'emptyfile', never as duplicates)
-# ---------------------------------------------------------------------------
+test_03_empty_files() {
 setup
 : > "$target/empty-one"
 : > "$target/empty-two"
@@ -131,10 +157,10 @@ expect_eq "3a empty files are not reported as unmatched" "" "$out"
 expect_status "3b empty files do not affect the exit code" 0
 expect_contains "3c empty files are named in a footnote" "2 empty files" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 4. Symlinks are not compared, and not silently dropped
-# ---------------------------------------------------------------------------
+test_04_symlinks() {
 setup
 printf 'real' > "$target/real.txt"
 printf 'real' > "$ref/real.txt"
@@ -143,10 +169,10 @@ run "$target" -r "$ref"
 expect_eq "4a symlinks are not reported as unmatched" "" "$out"
 expect_contains "4b symlinks are named in a footnote" "1 symlink" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 5. Filename containing a newline (regression: broke the sort/comm diff)
-# ---------------------------------------------------------------------------
+test_05_filename_containing_a_newline() {
 setup
 nl_name=$(printf 'two\nlines.txt')
 printf 'unmatched payload' > "$target/$nl_name"
@@ -158,10 +184,10 @@ expect_contains "5b ambiguous manifest is flagged" "contain a newline" "$err"
 out0=$("$SALVAGE" "$target" -r "$ref" --print0 2>/dev/null | tr '\0' '@')
 expect_eq "5c --print0 delimits with NUL" "$nl_name@" "$out0"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 6. Overlapping trees must be refused, not silently misreported
-# ---------------------------------------------------------------------------
+test_06_overlapping_trees() {
 setup
 mkdir -p "$ref/inner"
 printf 'x' > "$ref/inner/f"
@@ -173,10 +199,10 @@ expect_status "6c reference inside target is a fatal error" 2
 run "$ref" -r "$ref"
 expect_status "6d identical target and reference is a fatal error" 2
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 7. Multiple references
-# ---------------------------------------------------------------------------
+test_07_multiple_references() {
 setup
 ref2="$work/ref2"; mkdir -p "$ref2"
 printf 'alpha' > "$target/a"
@@ -190,10 +216,10 @@ run "$target" -r "$ref"
 expect_eq "7b one reference alone leaves more unmatched" "b
 c" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 8. Exit codes
-# ---------------------------------------------------------------------------
+test_08_exit_codes() {
 setup
 printf 'same' > "$target/f"
 printf 'same' > "$ref/f"
@@ -216,10 +242,10 @@ expect_contains "8h rejection suggests the -r form" "-r" "$err"
 run "$target" -r "$ref" --nonsense
 expect_status "8i exit 2 — unknown option" 2
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 9. Default exclusions
-# ---------------------------------------------------------------------------
+test_09_default_exclusions() {
 setup
 printf 'kept' > "$target/real.txt"
 printf 'kept' > "$ref/real.txt"
@@ -235,10 +261,10 @@ expect_eq "9c --no-default-excludes includes them" ".DS_Store
 .Spotlight-V100/store/idx
 Thumbs.db" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 10. User exclusions
-# ---------------------------------------------------------------------------
+test_10_user_exclusions() {
 setup
 mkdir -p "$target/logs"
 printf 'noise' > "$target/logs/a.log"
@@ -250,10 +276,10 @@ run "$target" -r "$ref" --exclude 'logs/*'
 expect_eq "10b glob with a slash matches the relative path" "b.log
 keep.txt" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 11. Path forms
-# ---------------------------------------------------------------------------
+test_11_path_forms() {
 setup
 mkdir -p "$target/sub"
 printf 'x' > "$target/sub/f.txt"
@@ -263,19 +289,19 @@ expect_eq "11a --absolute emits resolved absolute paths" "$target_real/sub/f.txt
 run "$target" -r "$ref"
 expect_eq "11b default is relative to target" "sub/f.txt" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 12. Filenames that look like options
-# ---------------------------------------------------------------------------
+test_12_option_like_filenames() {
 setup
 printf 'dash payload' > "$target/-rf"
 run "$target" -r "$ref"
 expect_eq "12a leading-dash filename is handled" "-rf" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 13. Structured report
-# ---------------------------------------------------------------------------
+test_13_structured_report() {
 setup
 printf 'aaa' > "$target/unmatched.txt"
 printf 'bbb' > "$target/matched.txt"
@@ -292,10 +318,10 @@ else
     no "13e --save-scan writes replayable rmlint JSON" "file missing or not a JSON array"
 fi
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 14. Stream separation
-# ---------------------------------------------------------------------------
+test_14_stream_separation() {
 setup
 printf 'x' > "$target/only.txt"
 run "$target" -r "$ref"
@@ -306,10 +332,10 @@ run "$target" -r "$ref" -q
 expect_eq "14d --quiet leaves stdout intact" "only.txt" "$out"
 expect_eq "14e --quiet silences stderr" "" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 15. Rollup and listing
-# ---------------------------------------------------------------------------
+test_15_rollup_and_listing() {
 setup
 mkdir -p "$target/whole"
 printf 'a' > "$target/whole/1"
@@ -332,10 +358,10 @@ expect_eq "15e long lists are complete on stdout" "63" "$(printf '%s\n' "$out" |
 run "$target" -r "$ref" --all
 expect_contains "15f --all prints the full list on stderr" "many-42" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 16. Help and version
-# ---------------------------------------------------------------------------
+test_16_help_and_version() {
 setup
 run --help
 expect_status "16a --help exits 0" 0
@@ -344,10 +370,10 @@ run --version
 expect_status "16c --version exits 0" 0
 expect_contains "16d --version reports rmlint" "rmlint" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 17. Paranoid mode agrees with the default
-# ---------------------------------------------------------------------------
+test_17_paranoid_mode() {
 setup
 printf 'identical bytes' > "$target/a"
 printf 'identical bytes' > "$ref/b"
@@ -356,12 +382,12 @@ run "$target" -r "$ref" --paranoid
 expect_eq "17a --paranoid agrees with blake2b" "c" "$out"
 expect_contains "17b comparison method is stated" "paranoid" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 18. Matching is by content, not by size. rmlint groups candidates by size
 #     first, so same-size-different-content is the case that would expose a
 #     false match — the only error mode here that loses data.
-# ---------------------------------------------------------------------------
+test_18_content_not_size() {
 setup
 printf 'AAAA' > "$target/a"
 printf 'BBBB' > "$ref/b"
@@ -371,10 +397,10 @@ printf 'AAAA' > "$ref/c"
 run "$target" -r "$ref"
 expect_eq "18b same size, same content is a match" "" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 19. Duplicates within the target itself
-# ---------------------------------------------------------------------------
+test_19_intra_target_duplicates() {
 setup
 printf 'twinned' > "$target/one"
 printf 'twinned' > "$target/two"
@@ -385,10 +411,10 @@ printf 'twinned' > "$ref/single-copy"
 run "$target" -r "$ref"
 expect_eq "19b one reference copy covers both target copies" "" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 20. The question is one-directional: reference-only files are never reported
-# ---------------------------------------------------------------------------
+test_20_one_directional() {
 setup
 printf 'shared' > "$target/t"
 printf 'shared' > "$ref/r"
@@ -400,10 +426,10 @@ expect_eq "20a reference-only files are not reported" "" "$out"
 expect_status "20b reference-only files do not affect the exit code" 0
 expect_not_contains "20c reference-only names never appear" "extra-1" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 21. Degenerate trees
-# ---------------------------------------------------------------------------
+test_21_degenerate_trees() {
 setup
 run "$target" -r "$ref"
 expect_status "21a empty target is fully covered" 0
@@ -420,10 +446,10 @@ run "$target" -r "$ref"
 expect_status "21e target of only empty files and symlinks is covered" 0
 expect_contains "21f and says nothing was comparable" "No files to compare" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 22. Recursion depth — the tool must reach the bottom of a deep tree
-# ---------------------------------------------------------------------------
+test_22_recursion_depth() {
 setup
 deep="a/b/c/d/e/f/g/h/i/j/k/l"
 mkdir -p "$target/$deep" "$ref/somewhere/else"
@@ -434,10 +460,10 @@ run "$target" -r "$ref"
 expect_eq "22a depth-12 match found regardless of path" "$deep/lost.txt" "$out"
 expect_contains "22b deep directory appears in the rollup" "$deep/" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 23. Hardlinks — two paths, one inode, both must be accounted for
-# ---------------------------------------------------------------------------
+test_23_hardlinks() {
 setup
 printf 'linked content' > "$target/original"
 ln "$target/original" "$target/hardlink"
@@ -448,10 +474,10 @@ printf 'linked content' > "$ref/copy"
 run "$target" -r "$ref"
 expect_eq "23b both hardlink paths matched by one reference copy" "" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 24. Filenames that break naive shell code
-# ---------------------------------------------------------------------------
+test_24_exotic_filenames() {
 setup
 names=(
     "plain.txt"
@@ -474,10 +500,10 @@ for n in "${names[@]}"; do
     expect_contains "24b reported verbatim: $n" "$n" "$out"
 done
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 25. Argument path forms
-# ---------------------------------------------------------------------------
+test_25_argument_path_forms() {
 setup
 printf 'x' > "$target/f"
 run "$target/" -r "$ref/"
@@ -492,10 +518,10 @@ expect_eq "25d the same reference given twice is harmless" "f" "$out"
 run -r "$ref" -- "$target"
 expect_eq "25e -- terminates option parsing" "f" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 26. An I/O failure must never look like a clean bill of health
-# ---------------------------------------------------------------------------
+test_26_unreadable_files() {
 setup
 printf 'readable' > "$target/fine.txt"
 printf 'readable' > "$ref/fine.txt"
@@ -508,10 +534,10 @@ expect_status "26a unreadable directory exits 2, not 0" 2
 expect_contains "26b and explains that coverage is unverified" "coverage cannot be verified" "$err"
 expect_eq "26c and emits no manifest" "" "$out"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 27. Determinism
-# ---------------------------------------------------------------------------
+test_27_determinism() {
 setup
 for n in zebra alpha Mike 10-ten 2-two _under; do printf 'v-%s' "$n" > "$target/$n"; done
 run "$target" -r "$ref"; first=$out
@@ -519,11 +545,11 @@ run "$target" -r "$ref"; second=$out
 expect_eq "27a repeated runs agree" "$first" "$second"
 expect_eq "27b stdout is sorted" "$(printf '%s\n' "$first" | LC_ALL=C sort)" "$first"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 28. Scale — xargs batches the stat call, and misaligned batches would
 #     silently attach the wrong size to the wrong file
-# ---------------------------------------------------------------------------
+test_28_scale() {
 setup
 n=2500
 i=0
@@ -544,10 +570,10 @@ expect_eq "28d sizes stay aligned across xargs batches" \
 expect_eq "28e no file is missing a size" "0" \
     "$(jq -r '[.unmatched[] | select(.size == null)] | length' "$work/scale.json")"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 29. Structured report for the covered case
-# ---------------------------------------------------------------------------
+test_29_json_covered_case() {
 setup
 printf 'covered' > "$target/f"
 printf 'covered' > "$ref/g"
@@ -557,10 +583,10 @@ expect_eq "29b covered report has zero bytes at risk" "0" "$(jq -r '.bytes_at_ri
 expect_eq "29c report records the comparison method" "blake2b" "$(jq -r '.comparison' "$work/covered.json")"
 expect_eq "29d report records every reference" "1" "$(jq -r '.references | length' "$work/covered.json")"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 30. --save-scan output is genuinely replayable
-# ---------------------------------------------------------------------------
+test_30_save_scan_replay() {
 setup
 printf 'matched' > "$target/m"; printf 'matched' > "$ref/m2"
 printf 'missing' > "$target/x"
@@ -572,10 +598,10 @@ else
     no "30a rmlint --replay accepts the saved scan" "replay failed"
 fi
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 31. No escape sequences leak into a non-terminal
-# ---------------------------------------------------------------------------
+test_31_no_ansi_escapes() {
 setup
 printf 'x' > "$target/f"
 run "$target" -r "$ref"
@@ -585,13 +611,13 @@ expect_not_contains "31b no ANSI on stdout" "$esc" "$out"
 run "$target" -r "$ref" --no-color
 expect_not_contains "31c --no-color is clean too" "$esc" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 33. stat(1) portability. The size probe is exercised here against a shim
 #     rather than against the host, so the GNU branch is covered on a BSD
 #     machine and vice versa. The shims compute sizes with wc so they work
 #     on either platform.
-# ---------------------------------------------------------------------------
+test_33_stat_portability() {
 setup
 shim="$work/shim"; mkdir -p "$shim"
 
@@ -631,10 +657,10 @@ b" "$out"
 expect_eq "33f unusable stat reports sizes as unknown" "null" "$(jq -r '.bytes_at_risk' "$work/nostat.json")"
 expect_contains "33g and says so on stderr" "sizes unavailable" "$err"
 teardown
+}
 
-# ---------------------------------------------------------------------------
 # 32. Optional lint
-# ---------------------------------------------------------------------------
+test_32_optional_lint() {
 if command -v shellcheck >/dev/null 2>&1; then
     lint_out=$(mktemp)
     shellcheck -S warning "$SALVAGE" "$0" >"$lint_out" 2>&1 || true
@@ -647,8 +673,54 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
     printf '%s  skip  32a shellcheck not installed%s\n' "$D" "$Z"
 fi
+}
 
 # ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+all_tests=$(declare -F | awk '{print $3}' | grep '^test_[0-9]')
+
+label() { printf '%s' "${1#test_}"; }
+
+if $LIST; then
+    for t in $all_tests; do printf '  %s\n' "$(label "$t")"; done
+    exit 0
+fi
+
+selected=""
+for t in $all_tests; do
+    keep=false
+    if [[ -z $nums && -z $pattern ]]; then
+        keep=true
+    else
+        for n in $nums; do
+            [[ $t == test_$(printf '%02d' "$n")_* ]] && keep=true
+        done
+        if [[ -n $pattern ]]; then
+            case $t in *"$pattern"*) keep=true ;; esac
+        fi
+    fi
+    $keep && selected="$selected $t"
+done
+
+if [[ -z ${selected// /} ]]; then
+    printf 'no groups matched. try: %s -l\n' "$0" >&2
+    exit 2
+fi
+
+total=$(printf '%s\n' $selected | grep -c .)
+if [[ -z $nums && -z $pattern ]]; then
+    printf 'running salvage tests\n\n'
+else
+    printf 'running %d of %d groups\n\n' "$total" "$(printf '%s\n' $all_tests | grep -c .)"
+fi
+
+for t in $selected; do
+    $VERBOSE && printf '%s· %s%s\n' "$D" "$(label "$t")" "$Z"
+    "$t"
+    teardown            # safety net: a group that returns early still cleans up
+done
+
 printf '\n'
 if [[ $fail -eq 0 ]]; then
     printf '%s%d passed, 0 failed%s\n' "$G" "$pass" "$Z"

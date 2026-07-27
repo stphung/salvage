@@ -15,6 +15,8 @@ repo directory is currently named `dupe-check` while the tool is named `salvage`
 
 ```sh
 make test           # full suite (~16s); or ./tests/run.sh
+make test T="5 22"  # only those groups; T="-k newline" filters by name
+make list-tests     # or ./tests/run.sh -l
 ./tests/run.sh -v   # print every passing assertion, not just failures
 make lint           # shellcheck salvage + tests (skips cleanly if not installed)
 make demo           # run against examples/, exits 1 by design
@@ -24,9 +26,10 @@ make link           # symlink instead of copy, for development
 bash -n salvage     # syntax check without executing
 ```
 
-**There is no way to run a single test.** `tests/run.sh` is a linear script of 33
-numbered groups. To iterate on one, comment out the others or copy the group into a
-scratch file. If you add a filter mechanism, keep the default behaviour identical.
+Each numbered group is a function `test_<NN>_<slug>`. The runner discovers them with
+`declare -F`, which sorts alphabetically — the zero-padded prefix is what gives run
+order, so there is no registry to keep in sync when adding a group. Just define the
+function; it will be picked up and selectable by number and by name.
 
 Requires `rmlint` >= 2.10 and `jq`. macOS ships bash 3.2 — see Constraints.
 

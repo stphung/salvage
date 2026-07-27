@@ -184,9 +184,12 @@ make demo
 ## Development
 
 ```sh
-make test           # 118 assertions, generated fixtures, ~16s
-./tests/run.sh -v   # show each one
-make lint           # shellcheck, if installed
+make test              # 118 assertions in 33 groups, generated fixtures, ~16s
+make test T="5 22"     # just those groups
+make test T="-k stat"  # groups whose name matches
+make list-tests        # what's available
+./tests/run.sh -v      # show every passing assertion
+make lint              # shellcheck, if installed
 ```
 
 Fixtures are generated rather than committed: empty files, symlinks and
