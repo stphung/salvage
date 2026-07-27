@@ -675,6 +675,55 @@ else
 fi
 }
 
+# 34. Report presentation: the verdict line, the header totals, the
+#     largest-at-risk section, and byte accounting. Bars and hyperlinks are
+#     TTY-only and are covered by group 31 asserting they never leak.
+test_34_report_presentation() {
+setup
+printf 'covered' > "$target/a"
+printf 'covered' > "$ref/elsewhere"
+run "$target" -r "$ref"
+expect_contains "34a covered runs get a positive verdict" "SAFE TO DELETE" "$err"
+expect_not_contains "34b covered runs do not say at risk" "AT RISK" "$err"
+
+printf 'lost data here' > "$target/b"
+run "$target" -r "$ref"
+expect_contains "34c uncovered runs lead with what is at risk" "AT RISK" "$err"
+expect_not_contains "34d uncovered runs do not claim safety" "SAFE TO DELETE" "$err"
+expect_contains "34e header states the file count" "2 files" "$err"
+expect_contains "34f header states the elapsed time" "scanned in" "$err"
+teardown
+
+# byte accounting: total must be matched + at-risk, so the coverage
+# percentages the meters draw cannot disagree with the file list
+setup
+printf '0123456789' > "$target/ten"          # 10 bytes, matched
+printf '0123456789' > "$ref/ten-copy"
+printf '01234'      > "$target/five"         # 5 bytes, unmatched
+run "$target" -r "$ref" --json "$work/b.json"
+expect_eq "34g bytes matched"  "10" "$(jq -r '.bytes_matched'  "$work/b.json")"
+expect_eq "34h bytes at risk"  "5"  "$(jq -r '.bytes_at_risk'  "$work/b.json")"
+expect_eq "34i bytes total is the sum" "15" "$(jq -r '.bytes_total' "$work/b.json")"
+expect_eq "34j totals reconcile" "true" \
+    "$(jq -r '.bytes_total == (.bytes_matched + .bytes_at_risk)' "$work/b.json")"
+teardown
+
+# largest-at-risk appears only once the list is too long to eyeball
+setup
+i=0
+while [[ $i -lt 12 ]]; do printf 'small-%s' "$i" > "$target/s$i"; i=$((i + 1)); done
+printf '%0*d' 5000 0 > "$target/whale.bin"
+run "$target" -r "$ref"
+expect_contains "34k largest-at-risk shown for long lists" "largest at risk" "$err"
+expect_contains "34l and names the biggest file" "whale.bin" "$err"
+teardown
+setup
+printf 'only' > "$target/one"
+run "$target" -r "$ref"
+expect_not_contains "34m largest-at-risk omitted for short lists" "largest at risk" "$err"
+teardown
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

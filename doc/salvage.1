@@ -58,8 +58,25 @@ because that is the form
 requires.
 .TP
 .B stderr
-The human report: header, totals, a per\-directory rollup sorted by size, and
-footnotes. A progress bar is shown while scanning if stderr is a terminal.
+The human report: a verdict line, coverage meters, a per\-directory rollup sorted
+by size, the largest files at risk, and footnotes. A progress bar is shown while
+scanning if stderr is a terminal.
+.PP
+The two coverage meters report the same scan by file count and by volume. They
+diverge exactly when it matters \(em many small files copied while the large ones
+were missed \(em so "92% of files but 20% of bytes" is a normal and important
+reading.
+.PP
+When stderr is a terminal and colour is enabled, the report additionally draws
+coverage bars and marks each path as an OSC 8 hyperlink, which most modern
+terminals render as clickable. Redirecting stderr, or passing
+.BR \-\-no\-color ,
+yields the same report as plain text. stdout is identical either way.
+.PP
+The
+.B largest at risk
+list appears only when the unmatched list is too long to read in full; it is
+usually a handful of files accounting for most of the total.
 .SH OPTIONS
 .TP
 .BR \-r ", " \-\-reference " " \fIDIR\fR

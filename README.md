@@ -13,21 +13,34 @@ It only reports. It never copies, moves, or deletes anything.
 $ salvage ./old-drive -r ./backup
 target:     /Users/me/old-drive
 references: /Users/me/backup
-comparison: blake2b
+comparison: blake2b · 51,830 files · 2.1 TB · scanned in 14m 32s
 
-4,212 of 51,830 files have no content match — 88.4 GB
+✗ 88.4 GB AT RISK — 4,212 of 51,830 files exist nowhere else.
 
-  Photos/2019/         1,842/1,842 files   61.2 GB  ← nothing matched
-  Photos/2020/           312/2,904 files    9.8 GB
-  Documents/scans/        88/  120 files    4.1 GB
-  ... 34 more directories
+  files  ██████████████████░░   91.9% covered   4,212 unmatched
+  bytes  ████░░░░░░░░░░░░░░░░   20.1% covered   88.4 GB at risk
+
+  Photos/2019/       ░░░░░░░░░░    0%  1,842/1,842 files   61.2 GB
+  Photos/2020/       █████████░   89%    312/2,904 files    9.8 GB
+  Documents/scans/   ███████░░░   73%     88/  120 files    4.1 GB
+
+  largest at risk
+    38.2 GB  Photos/2019/raw/wedding-master.mov
+     9.4 GB  Video/2018-holiday.mp4
+     4.1 GB  Documents/scans/archive-2003.tiff
 
   (full list on stdout — 4,212 paths; use --all to print here)
   (1,204 OS metadata files excluded; --no-default-excludes to include)
 ```
 
-That rollup is the point: `Photos/2019` was never backed up at all, and it's 61 GB.
-A flat list of 4,212 filenames would not have told you that.
+**92% of files but 20% of bytes** is the line that changes your decision — the
+classic backup failure, where thousands of small files copied and the video library
+didn't. An empty bar means a directory was never backed up at all. And `largest at
+risk` is usually five entries that account for most of the total.
+
+In a terminal those paths are clickable (⌘-click opens them in Finder). Bars, colour
+and links appear only on a terminal — redirect stderr and you get the same report in
+plain text, with stdout untouched either way.
 
 ## Install
 

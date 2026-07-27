@@ -54,6 +54,24 @@ tool.
 5. **Render** — a second jq program formats the stderr report; stdout is written
    separately from `result.json`.
 
+Matched-file sizes come from the rmlint JSON (`.size`), not from `stat` — only
+*unmatched* files are stat'ed. That is what makes byte-coverage percentages free
+rather than a second pass over the whole tree.
+
+### Rendering
+
+`$rich` (TTY and colour enabled) gates coverage bars and OSC 8 hyperlinks. Both are
+suppressed when stderr is redirected, so logs stay plain — and because stdout is a
+separate contract, none of it can reach the manifest.
+
+Hyperlinks may only be applied where the path is the **last column**. The escapes
+have zero display width, so `rpad`/`lpad` would miscount and break alignment
+anywhere else.
+
+The two coverage meters (by file count, by bytes) are the point of the header: they
+diverge precisely in the case that matters, where many small files were copied and
+the large ones missed.
+
 ### Invariants that must not be broken
 
 **Stream contract.** stdout carries the manifest — relative paths, one per line,
@@ -91,6 +109,12 @@ These cost real time during development. All are live hazards for future edits.
 byte in the file truncates the jq program at that point when bash passes it as argv,
 and `grep` will report the file as binary and silently print nothing. Check with
 `LC_ALL=C tr -dc '\0' < salvage | wc -c` — it must be 0.
+
+**In jq, `"x" * 0` is `null`, not `""`.** Every string repeat — padding, coverage
+bars — needs a guard, or a zero-width column silently becomes the JSON null.
+
+**jq's `not` is a filter, not a prefix operator.** `not $rich` is a syntax error;
+write `($rich | not)`.
 
 **jq's `any(gen; cond)` rebinds `.`.** `any($regexes[]; $base | test(.))` tests
 `$base` against *itself*, because the pipe rebinds `.` before `test` sees it. This

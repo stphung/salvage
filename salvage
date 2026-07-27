@@ -358,6 +358,7 @@ fi
 
 if $opt_paranoid; then method="paranoid (byte-for-byte)"; else method="blake2b"; fi
 
+start_ts=$(date +%s)
 rmlint_status=0
 if $opt_verbose; then
     rmlint "${rmlint_args[@]}" -v 1>&2 || rmlint_status=$?
@@ -421,10 +422,9 @@ jq -n \
     ($inv | split("\u0000") | map(select(length > 0) | stripdot)) as $all
     | ([ $rmlint[0][]
          | select(type == "object" and .type == "duplicate_file")
-         | .path
-         | select(startswith($prefix))
-         | .[($prefix | length):]
-       ] | map({key: ., value: true}) | from_entries) as $matched
+         | select(.path | startswith($prefix))
+         | {key: (.path[($prefix | length):]), value: (.size // 0)}
+       ] | from_entries) as $matched
     | ($all | map(select(
           . as $path
           | ($path | split("/")) as $parts
@@ -439,6 +439,7 @@ jq -n \
         excluded:    (($all | length) - ($considered | length)),
         considered:  ($considered | length),
         matched:     (($considered | length) - ($unmatched | length)),
+        matched_bytes: ($considered | map($matched[.]) | map(select(. != null)) | add // 0),
         unmatched:   $unmatched,
         dirtotals:   ($considered | group_by(dirof)
                       | map({key: (.[0] | dirof), value: length}) | from_entries)
@@ -489,6 +490,9 @@ newline_paths=$(jq -r '[.unmatched[] | select(test("\n"))] | length' "$result_js
 # ---------------------------------------------------------------------------
 # stderr: the human report.
 # ---------------------------------------------------------------------------
+elapsed=$(( $(date +%s) - start_ts ))
+[[ $elapsed -lt 0 ]] && elapsed=0
+
 if ! $opt_quiet; then
     refs_json=$(to_json_array "${abs_references[@]}")
     jq -rn \
@@ -504,6 +508,8 @@ if ! $opt_quiet; then
         --argjson show_all "$opt_all" \
         --argjson rollup "$opt_rollup" \
         --argjson newlines "$newline_paths" \
+        --argjson rich "$use_color" \
+        --argjson elapsed "$elapsed" \
         --arg reset "$C_RESET" --arg bold "$C_BOLD" --arg dim "$C_DIM" \
         --arg red "$C_RED" --arg green "$C_GREEN" --arg yellow "$C_YELLOW" \
         '
@@ -522,6 +528,28 @@ if ! $opt_quiet; then
         def rpad($w): tostring | if length < $w then . + (" " * ($w - length)) else . end;
         def dirof: rindex("/") as $i | if $i == null then "." else .[0:$i] end;
 
+        # jq returns null for "x" * 0, so every repeat needs a guard.
+        def rep($n): if $n > 0 then ("" + .) * $n else "" end;
+        def bar($pct; $w):
+          (($pct * $w / 100) | floor) as $n
+          | ("█" | rep($n)) + ("░" | rep($w - $n));
+        def duration:
+          if   . < 1    then "under a second"
+          elif . < 60   then "\(. | floor)s"
+          elif . < 3600 then "\((. / 60) | floor)m \((. % 60) | floor)s"
+          else               "\((. / 3600) | floor)h \(((. % 3600) / 60) | floor)m" end;
+        # OSC 8: makes the path clickable in iTerm2 and most modern terminals,
+        # and is invisible everywhere else. Only ever used where the path is
+        # the last column, since the escapes have no width and would otherwise
+        # throw off padding.
+        def link:
+          . as $rel
+          | if $rich then
+              "\u001b]8;;file://"
+              + (($target + "/" + $rel) | split("/") | map(@uri) | join("/"))
+              + "\u001b\\" + $rel + "\u001b]8;;\u001b\\"
+            else $rel end;
+
         $res[0] as $r
         | (if $have_sizes
            then ($sizes | split("\n") | map(select(length > 0) | tonumber))
@@ -530,32 +558,51 @@ if ! $opt_quiet; then
            | to_entries
            | map({path: .value, size: (if $have_sizes then $sz[.key] else 0 end)})) as $items
         | ($items | map(.size) | add // 0) as $total_bytes
+        | ($r.matched_bytes + $total_bytes) as $all_bytes
+        | ($r.unmatched | length) as $n_unmatched
+        | (if $r.considered > 0 then $r.matched * 100 / $r.considered else 100 end) as $pct_files
+        | (if $all_bytes > 0 then $r.matched_bytes * 100 / $all_bytes else 100 end) as $pct_bytes
 
         | "\($bold)target:\($reset)     \($target)"
         , ( $refs | to_entries[]
             | if .key == 0 then "\($bold)references:\($reset) \(.value)"
               else "            \(.value)" end )
-        , "\($dim)comparison: \($method)\($reset)"
+        , ( "\($dim)comparison: \($method) · \($r.considered | commafy) files"
+            + (if $have_sizes and $all_bytes > 0 then " · \($all_bytes | human)" else "" end)
+            + " · scanned in \($elapsed | duration)\($reset)" )
         , ""
 
-        , ( if $r.unmatched | length | . == 0 then
-              ( if $r.considered == 0 then
-                  "\($yellow)No files to compare.\($reset)"
-                else
-                  "\($green)All \($r.considered | commafy) files in the target have a content match.\($reset)"
-                end )
+        , ( if $r.considered == 0 then
+              "\($yellow)No files to compare.\($reset)"
+            elif $n_unmatched == 0 then
+              "\($green)\($bold)✓ SAFE TO DELETE\($reset)\($green) — all \($r.considered | commafy) files are covered.\($reset)"
             else
-              "\($red)\($bold)\($r.unmatched | length | commafy) of \($r.considered | commafy) files have no content match\($reset)"
-              + (if $have_sizes then " — \($total_bytes | human)" else "" end)
+              "\($red)\($bold)✗ \(if $have_sizes then "\($total_bytes | human) AT RISK" else "\($n_unmatched | commafy) FILES AT RISK" end)\($reset)"
+              + "\($red) — \($n_unmatched | commafy) of \($r.considered | commafy) files exist nowhere else.\($reset)"
             end )
 
-        , ( if ($rollup and (($r.unmatched | length) > 0)) then
+        # coverage meters. Files and bytes diverge exactly when it matters:
+        # many small files copied, the large ones missed.
+        , ( if ($rich and $r.considered > 0) then
+              "",
+              "  \($dim)files\($reset)  \(if $pct_files >= 100 then $green else $yellow end)\($pct_files | bar(.; 20))\($reset)"
+                + "  \(($pct_files * 10 | round) / 10 | tostring | lpad(5))% covered"
+                + (if $n_unmatched > 0 then "   \($dim)\($n_unmatched | commafy) unmatched\($reset)" else "" end),
+              ( if $have_sizes and $all_bytes > 0 then
+                  "  \($dim)bytes\($reset)  \(if $pct_bytes >= 100 then $green else $red end)\($pct_bytes | bar(.; 20))\($reset)"
+                  + "  \(($pct_bytes * 10 | round) / 10 | tostring | lpad(5))% covered"
+                  + (if $total_bytes > 0 then "   \($dim)\($total_bytes | human) at risk\($reset)" else "" end)
+                else empty end )
+            else empty end )
+
+        , ( if ($rollup and $n_unmatched > 0) then
               ( ( $items
                   | group_by(.path | dirof)
                   | map({ dir:   (.[0].path | dirof),
                           n:     length,
                           bytes: (map(.size) | add // 0) })
                   | map(. + { total: ($r.dirtotals[.dir] // .n) })
+                  | map(. + { cov: (if .total > 0 then (.total - .n) * 100 / .total else 0 end) })
                   | sort_by(if $have_sizes then -.bytes else 0 end, .dir) ) as $rows
                 | ( $rows | map((.dir | if . == "." then "./" else . + "/" end) | length) | max ) as $w
                 | ( $rows | map("\(.n | commafy)/\(.total | commafy) files" | length) | max ) as $cw
@@ -564,16 +611,29 @@ if ! $opt_quiet; then
                   ( $rows[]
                     | "  "
                       + ((.dir | if . == "." then "./" else . + "/" end) | rpad($w))
+                      + (if $rich then
+                           "  " + (if .cov == 0 then $red elif .cov >= 100 then $green else $yellow end)
+                           + (.cov | bar(.; 10)) + $reset
+                           + "  " + ((.cov | floor | tostring) | lpad(3)) + "%"
+                         else "" end)
                       + "  " + ("\(.n | commafy)/\(.total | commafy) files" | lpad($cw))
                       + (if $have_sizes then "  " + (.bytes | human | lpad($bw)) else "" end)
-                      + (if .n == .total then "  \($yellow)← nothing matched\($reset)" else "" end) ) )
+                      + (if (.n == .total and ($rich | not)) then "  \($yellow)← nothing matched\($reset)" else "" end) ) )
             else empty end )
 
-        , ( if ($r.unmatched | length) == 0 then empty
-            elif ($show_all or (($r.unmatched | length) <= $threshold)) then
-              "", ($r.unmatched[] | "  " + .)
+        # what is actually at stake, when the list is too long to eyeball
+        , ( if ($have_sizes and $n_unmatched > 10 and $total_bytes > 0) then
+              ( ($items | sort_by(-.size) | .[0:5]) as $top
+                | ( $top | map(.size | human | length) | max ) as $tw
+                | "", "  \($dim)largest at risk\($reset)",
+                  ( $top[] | "    " + (.size | human | lpad($tw)) + "  " + (.path | link) ) )
+            else empty end )
+
+        , ( if $n_unmatched == 0 then empty
+            elif ($show_all or ($n_unmatched <= $threshold)) then
+              "", ($r.unmatched[] | "  " + link)
             else
-              "", "  \($dim)(full list on stdout — \($r.unmatched | length | commafy) paths; --all to print here)\($reset)"
+              "", "  \($dim)(full list on stdout — \($n_unmatched | commafy) paths; --all to print here)\($reset)"
             end )
 
         , ( [ (if $empty > 0 then "\($empty | commafy) empty file\(if $empty == 1 then "" else "s" end)" else empty end),
@@ -631,6 +691,10 @@ if [[ -n $json_path ]]; then
             },
             bytes_at_risk: (if ($r.unmatched | length) == 0 then 0
                             elif $have_sizes then ($sz | add // 0)
+                            else null end),
+            bytes_matched: $r.matched_bytes,
+            bytes_total:   (if ($r.unmatched | length) == 0 then $r.matched_bytes
+                            elif $have_sizes then ($r.matched_bytes + ($sz | add // 0))
                             else null end),
             unmatched: ($r.unmatched | to_entries
                         | map({ path: .value,
