@@ -13,7 +13,7 @@ ZSHDIR   = $(DESTDIR)$(PREFIX)/share/zsh/site-functions
 BASHDIR  = $(DESTDIR)$(PREFIX)/share/bash-completion/completions
 
 .DEFAULT_GOAL := help
-.PHONY: help install uninstall link unlink test list-tests lint deps demo
+.PHONY: help install uninstall link unlink test list-tests lint deps demo check-version dist
 
 T ?=
 
@@ -74,3 +74,26 @@ deps: ## Check for rmlint and jq
 
 demo: ## Run salvage against the bundled example
 	@./salvage examples/project -r examples/backup || true
+
+VERSION = $(shell sed -n 's/^VERSION="\(.*\)"/\1/p' salvage)
+
+check-version: ## Verify the version agrees across the script and the man page
+	@script_v='$(VERSION)'; \
+	man_v=$$(sed -n '1s/.*"salvage \([0-9][0-9.]*\)".*/\1/p' doc/salvage.1); \
+	if [ -z "$$script_v" ]; then echo "could not read VERSION from salvage" >&2; exit 1; fi; \
+	if [ "$$script_v" != "$$man_v" ]; then \
+		echo "version mismatch: salvage=$$script_v doc/salvage.1=$$man_v" >&2; exit 1; \
+	fi; \
+	if [ -n "$(EXPECT)" ] && [ "$(EXPECT)" != "$$script_v" ]; then \
+		echo "version mismatch: tag=$(EXPECT) salvage=$$script_v" >&2; exit 1; \
+	fi; \
+	echo "version $$script_v consistent"
+
+dist: check-version ## Build a release tarball in dist/
+	@rm -rf dist && mkdir -p dist/salvage-$(VERSION)
+	@cp -R salvage README.md Makefile doc completions examples dist/salvage-$(VERSION)/
+	@tar -czf dist/salvage-$(VERSION).tar.gz -C dist salvage-$(VERSION)
+	@cp salvage dist/salvage
+	@rm -rf dist/salvage-$(VERSION)
+	@cd dist && shasum -a 256 salvage salvage-$(VERSION).tar.gz > SHA256SUMS
+	@echo "built:"; ls -1 dist

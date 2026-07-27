@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macOS is the platform salvage is developed on — bash 3.2 and a BSD
+    # userland. Linux is not a nice-to-have here: it is the only place the
+    # GNU `stat -c` branch and GNU find/sed run for real rather than behind
+    # the shim used by test group 33.
+    name: test · ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (BSD userland, bash 3.2)
+          - os: ubuntu-latest
+            label: Linux (GNU userland)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rmlint and jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install rmlint jq
+
+      - name: Install rmlint and jq (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rmlint jq
+
+      - name: Report the toolchain
+        run: |
+          ./salvage --version
+          bash --version | head -1
+          # which stat dialect this runner actually exercises
+          if stat -f '%z' Makefile >/dev/null 2>&1; then
+            echo "stat dialect: BSD (-f '%z')"
+          elif stat -c '%s' Makefile >/dev/null 2>&1; then
+            echo "stat dialect: GNU (-c '%s')"
+          else
+            echo "stat dialect: NEITHER — sizes will degrade"
+          fi
+
+      - name: Version consistency
+        run: make check-version
+
+      - name: Tests
+        run: make test
+
+      - name: Demo still runs
+        run: make demo
+
+  lint:
+    # Advisory for now: shellcheck has never been run against this codebase,
+    # so making it blocking on day one would just paint CI red. Once the
+    # findings are triaged, drop the continue-on-error line below.
+    name: shellcheck (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Lint
+        run: shellcheck -S warning salvage tests/run.sh

@@ -1,0 +1,109 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0). Must already exist.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Built and tested on macOS: it is the platform salvage targets, and the
+    # one whose bash 3.2 constraint the script is written against. The Linux
+    # job in ci.yml covers the other userland.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          echo "tag=$tag"           >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}"   >> "$GITHUB_OUTPUT"
+
+      - name: Install rmlint and jq
+        run: brew install rmlint jq
+
+      # A tag that disagrees with the script would ship a binary announcing
+      # the wrong version of itself, and a man page announcing a third.
+      - name: Version consistency
+        run: make check-version EXPECT='${{ steps.tag.outputs.version }}'
+
+      - name: Tests
+        run: make test
+
+      - name: Build artifacts
+        run: make dist
+
+      # Publishing an artifact nobody installed is how broken releases ship.
+      - name: Verify the tarball installs and the installed copy runs
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -eux
+          workdir=$(mktemp -d)
+          tar -xzf "dist/salvage-$VERSION.tar.gz" -C "$workdir"
+          cd "$workdir/salvage-$VERSION"
+          make install PREFIX="$workdir/prefix"
+          "$workdir/prefix/bin/salvage" --version
+          test -f "$workdir/prefix/share/man/man1/salvage.1"
+          test -f "$workdir/prefix/share/zsh/site-functions/_salvage"
+          # The bundled example is deliberately not fully covered, so a
+          # working build must exit 1 here. Exit 0 would mean the comparison
+          # silently did nothing.
+          if "$workdir/prefix/bin/salvage" examples/project -r examples/backup >/dev/null; then
+            echo "expected exit 1 from the uncovered example; got 0" >&2
+            exit 1
+          fi
+          echo "installed artifact works"
+
+      - name: Compose release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          cat > dist/NOTES.md <<NOTES
+          \`salvage\` is a single self-contained shell script. It needs
+          [rmlint](https://rmlint.readthedocs.io) 2.10+ and \`jq\` at runtime.
+
+              brew install rmlint jq
+
+          **Just the script:**
+
+              curl -fsSLo ~/.local/bin/salvage \\
+                https://github.com/${{ github.repository }}/releases/download/$TAG/salvage
+              chmod +x ~/.local/bin/salvage
+
+          **With the man page and shell completions:**
+
+              tar -xzf salvage-$VERSION.tar.gz
+              cd salvage-$VERSION
+              make install          # → ~/.local, no sudo
+
+          Verify downloads with \`shasum -a 256 -c SHA256SUMS\`.
+
+          Tested on macOS (BSD userland, bash 3.2) and Linux (GNU userland).
+          NOTES
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --title "salvage $VERSION" \
+            --notes-file dist/NOTES.md \
+            dist/salvage \
+            "dist/salvage-$VERSION.tar.gz" \
+            dist/SHA256SUMS

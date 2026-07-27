@@ -1,5 +1,7 @@
 # salvage
 
+[![ci](https://github.com/stphung/salvage/actions/workflows/ci.yml/badge.svg)](https://github.com/stphung/salvage/actions/workflows/ci.yml)
+
 **If I delete this, what do I lose?**
 
 `salvage` compares a directory against one or more backups *by content* — checksums,
@@ -50,6 +52,15 @@ plain text, with stdout untouched either way.
 ```sh
 brew install rmlint jq
 make install                    # → ~/.local, no sudo
+```
+
+Or take a [release](https://github.com/stphung/salvage/releases) — the script alone is
+the whole tool:
+
+```sh
+curl -fsSLo ~/.local/bin/salvage \
+  https://github.com/stphung/salvage/releases/latest/download/salvage
+chmod +x ~/.local/bin/salvage
 ```
 
 `make install` places the script, its man page, and shell completions under `PREFIX`,
@@ -270,6 +281,27 @@ whichever platform you run, using a shim.
 `examples/project` and `examples/backup` are a hand-inspectable demo — a small Rust
 project partially backed up, with a moved file, a renamed file, changed content and
 several files missing entirely.
+
+### Releasing
+
+CI runs the suite on macOS and Linux for every push. The Linux job matters
+disproportionately: it is the only place the GNU `stat` branch and GNU `find`/`sed`
+run for real rather than behind the shim in test group 33.
+
+To cut a release, bump the version in **two** places — `VERSION=` in `salvage` and the
+`.TH` line of `doc/salvage.1` — then tag:
+
+```sh
+make check-version          # refuses if the two disagree
+git tag v1.1.0 && git push origin v1.1.0
+```
+
+The release workflow re-checks that the tag agrees with both, runs the suite, builds
+the artifacts, then **extracts the tarball, installs it, and runs the installed copy**
+before publishing — a release nobody installed is how broken releases ship.
+
+Artifacts: the bare `salvage` script, a tarball with the man page and completions, and
+`SHA256SUMS`.
 
 ### Portability
 

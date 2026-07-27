@@ -23,8 +23,21 @@ make demo           # run against examples/, exits 1 by design
 make deps           # verify rmlint and jq are present
 make install        # → ~/.local; PREFIX=... to override; make uninstall reverses
 make link           # symlink instead of copy, for development
+make check-version  # VERSION= in salvage must equal the .TH line in doc/salvage.1
+make dist           # release artifacts into dist/
 bash -n salvage     # syntax check without executing
 ```
+
+CI (`.github/workflows/ci.yml`) runs the suite on macOS **and Linux**. The Linux job
+is not redundant: it is the only place the GNU `stat -c` branch and GNU `find`/`sed`
+execute for real rather than behind the shim in test group 33. The shellcheck job is
+deliberately `continue-on-error` — shellcheck has never been run against this
+codebase, so it is advisory until someone triages the findings and removes that line.
+
+Releases are tag-driven (`v*`). The version lives in **two** places and
+`make check-version` enforces agreement; the release workflow additionally checks the
+tag matches, and installs the built tarball and runs the installed copy before
+publishing.
 
 Each numbered group is a function `test_<NN>_<slug>`. The runner discovers them with
 `declare -F`, which sorts alphabetically — the zero-padded prefix is what gives run

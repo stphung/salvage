@@ -6,6 +6,9 @@ rmlint.json
 rmlint.sh
 rmlint.replay.json
 
+# release artifacts, rebuilt by `make dist`
+dist/
+
 # scratch output from salvage runs
 *.manifest
 manifest*.txt
