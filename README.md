@@ -126,6 +126,54 @@ to masquerade as a clean bill of health.
 Since `1` is a normal outcome rather than a failure, callers under `set -e` need
 `|| true` or an explicit check. This follows `diff` and `grep`.
 
+## Where should it go? (`--suggest`)
+
+Once you know a file exists nowhere else, the next question is where in the backup it
+belongs. `salvage` infers that — and the destination is **learned, not guessed**.
+
+rmlint pairs every matched file with its reference twin, so each match reveals where
+that directory's contents already live. If your backup reorganised `src/` into `lib/`,
+the suggestion follows the reorganisation instead of mirroring the target:
+
+```console
+$ salvage ./project -r ./backup --suggest
+
+  suggested placement
+    src/new_module.rs      →  backup/src/new_module.rs
+                              siblings 1/1
+    vendor/pkg/sub/dep.rs  →  backup/vendor/pkg/sub/dep.rs
+                              inherited from ./ (siblings 1/1) · confidence 70%
+    src/lib.rs             →  backup/src/lib.rs
+                              same name already in the reference, with different content  ⚠ would overwrite
+```
+
+Every suggestion says how it was reached:
+
+| Reason | Meaning |
+|---|---|
+| `siblings n/m` | *n* of *m* matched files in that directory landed here. Unanimous = full confidence. |
+| `inherited from DIR/` | No matched file in this directory; used the nearest mapped ancestor. Reduced confidence. |
+| `mirrored` | No signal anywhere above it. Reproduces the target layout. Zero confidence. |
+| `same name … different content` | Not a new file — a **changed** one. Copying would overwrite the backup's copy. |
+
+With several references, placement follows whichever one the matched siblings used.
+
+### Moving files in
+
+`salvage` still never touches your data. `--plan` writes a shell script for you to
+read and run:
+
+```sh
+salvage ./project -r ./backup --plan rescue.sh
+less rescue.sh          # every line commented with its reason
+sh rescue.sh
+salvage ./project -r ./backup && echo "now fully covered — safe to delete"
+```
+
+Overwrites and collisions are emitted **commented out**, so the default run can't
+clobber anything. The plan copies rather than moves: rerunning is harmless, the target
+stays intact, and you verify with a second `salvage` run before deleting anything.
+
 ## What gets compared
 
 **Hidden files are compared.** `.env`, `.gitignore`, `.git/` — all of it. They're
@@ -156,6 +204,9 @@ The distinction: hidden *user data* is included; filesystem *scratch space* is n
 | `--exclude GLOB` | Additional exclusion. Repeatable. No `/` matches basenames; otherwise the relative path |
 | `--no-default-excludes` | Include OS metadata |
 | `--exclude-hidden` | Skip dotfiles entirely |
+| `--suggest` | Show where each unmatched file belongs in the reference |
+| `--suggest-json PATH` | Those suggestions as JSON, with reason and confidence |
+| `--plan PATH` | Reviewable shell script that copies them into place (never run by salvage) |
 | `--json PATH` | Structured report — counts, bytes at risk, per-file sizes |
 | `--save-scan PATH` | Raw rmlint JSON, replayable with `rmlint --replay` |
 | `-v`, `--verbose` | Pass rmlint's output through |

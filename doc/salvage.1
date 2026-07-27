@@ -128,6 +128,24 @@ below.
 .B \-\-exclude\-hidden
 Skip dotfiles and dot\-directories entirely.
 .TP
+.B \-\-suggest
+For each unmatched file, show where it would belong in the reference. See
+.B PLACEMENT
+below.
+.TP
+.BI \-\-suggest\-json " PATH"
+Write the same suggestions to
+.I PATH
+as JSON: destination, reason, confidence, and whether the destination is
+already occupied or collides with another suggestion.
+.TP
+.BI \-\-plan " PATH"
+Write a reviewable
+.BR sh (1)
+script that copies each unmatched file to its suggested destination.
+.B salvage does not run it.
+Read it, then run it yourself.
+.TP
 .BI \-\-json " PATH"
 Write a structured report to
 .IR PATH :
@@ -211,6 +229,54 @@ The distinction is that hidden
 is included while filesystem
 .I scratch space
 is not.
+.SH PLACEMENT
+.B \-\-suggest
+answers the follow-up question: if a file exists nowhere else, where in the
+reference should it go?
+.PP
+The destination is
+.I learned,
+not guessed.
+.BR rmlint (1)
+pairs every matched file with its reference twin, so each match reveals where
+that directory's contents already live in the reference. A directory whose
+files were reorganised or renamed on the backup side is therefore followed
+correctly, not mirrored.
+.PP
+Each suggestion carries the reason it was reached:
+.TP
+.B siblings n/m
+.I n
+of
+.I m
+matched files in the same directory landed in this reference directory. A
+unanimous vote is full confidence.
+.TP
+.B inherited from DIR/
+The file's own directory contains no matched file, so the mapping of the
+nearest mapped ancestor was used and the remaining path appended. Confidence
+is reduced.
+.TP
+.B mirrored
+Nothing above the file matched anything, so there is no signal at all and the
+target's layout is reproduced under the first reference. Confidence is zero.
+.TP
+.B same name already in the reference, with different content
+This is not a new file but a changed one. Copying it would overwrite the
+reference's copy, so it is reported and, in a
+.BR \-\-plan ,
+emitted commented out.
+.PP
+Two unmatched files resolving to one destination are reported as a collision
+and likewise commented out. With several references, placement follows
+whichever reference the matched siblings landed in.
+.PP
+A plan copies rather than moves, so rerunning it is harmless and the target is
+left intact. Verify with a second
+.B salvage
+run \(em exit status
+.B 0
+means the copy achieved full coverage \(em before deleting anything.
 .SH HASHING
 The default is blake2b at 512 bits. A collision would produce a false
 .IR match \(em

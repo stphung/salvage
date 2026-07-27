@@ -60,6 +60,9 @@ opt_quiet=false
 opt_color=auto
 json_path=""
 save_scan_path=""
+opt_suggest=false
+suggest_json_path=""
+plan_path=""
 
 LIST_THRESHOLD=50
 
@@ -109,6 +112,12 @@ OPTIONS
                           Do not exclude OS metadata (.DS_Store, .Spotlight-V100,
                           .fseventsd, Thumbs.db, \$RECYCLE.BIN, ...).
       --exclude-hidden    Skip dotfiles and dot-directories entirely.
+      --suggest           Show where each unmatched file would belong in the
+                          reference, inferred from where its matched siblings
+                          already live.
+      --suggest-json PATH Write those suggestions as JSON.
+      --plan PATH         Write a reviewable shell script that copies the
+                          unmatched files into place. $PROG does not run it.
       --json PATH         Write a structured report to PATH.
       --save-scan PATH    Save the raw rmlint JSON for 'rmlint --replay'.
   -v, --verbose           Pass rmlint's own output through.
@@ -147,6 +156,15 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "option '$1' requires a path"
             save_scan_path=$2; shift 2 ;;
         --save-scan=*)  save_scan_path=${1#*=}; shift ;;
+        --suggest)      opt_suggest=true; shift ;;
+        --suggest-json)
+            [[ $# -ge 2 ]] || die "option '$1' requires a path"
+            suggest_json_path=$2; shift 2 ;;
+        --suggest-json=*) suggest_json_path=${1#*=}; shift ;;
+        --plan)
+            [[ $# -ge 2 ]] || die "option '$1' requires a path"
+            plan_path=$2; shift 2 ;;
+        --plan=*)       plan_path=${1#*=}; shift ;;
         --absolute)     opt_absolute=true; shift ;;
         --print0)       opt_print0=true; shift ;;
         --all)          opt_all=true; shift ;;
@@ -493,6 +511,167 @@ newline_paths=$(jq -r '[.unmatched[] | select(test("\n"))] | length' "$result_js
 elapsed=$(( $(date +%s) - start_ts ))
 [[ $elapsed -lt 0 ]] && elapsed=0
 
+# ---------------------------------------------------------------------------
+# Placement suggestions.
+#
+# rmlint groups a target file with its reference twin by checksum, so every
+# match already tells us where that directory's contents live in the
+# reference. We learn a target-dir -> reference-dir map from the matches and
+# apply it to the files that did not match. No filename guessing is involved
+# for the common case.
+#
+# The reference inventory is only needed to spot a destination that is
+# already occupied — rmlint's JSON lists reference files that matched
+# something, never the rest of the tree.
+# ---------------------------------------------------------------------------
+suggest_json="$workdir/suggest.json"
+want_suggestions=false
+if $opt_suggest || [[ -n $suggest_json_path ]] || [[ -n $plan_path ]]; then
+    want_suggestions=true
+fi
+
+if $want_suggestions && [[ $unmatched_count -gt 0 ]]; then
+    ref_inventory="$workdir/refs.z"
+    : > "$ref_inventory"
+    for ref in "${abs_references[@]}"; do
+        find "$ref" -type f -print0 >> "$ref_inventory" 2>/dev/null || true
+    done
+
+    jq -n \
+        --slurpfile res "$result_json" \
+        --slurpfile rmlint "$scan_json" \
+        --rawfile refinv "$ref_inventory" \
+        --arg prefix "$target/" \
+        --arg default_ref "${abs_references[0]}" \
+        '
+        def dirof: rindex("/") as $i | if $i == null then "." else .[0:$i] end;
+        def basename: rindex("/") as $i | if $i == null then . else .[($i + 1):] end;
+        def ancestor_chain:
+          . as $d
+          | if $d == "." then ["."]
+            else ($d | split("/")) as $p
+              | [ range(($p | length); 0; -1) | $p[0:.] | join("/") ] + ["."]
+            end;
+
+        $res[0] as $r
+        | ($refinv | split("\u0000") | map(select(length > 0))
+           | map({key: ., value: true}) | from_entries) as $refset
+
+        # pair each matched target file with a reference twin, via checksum
+        | ([ $rmlint[0][] | select(type == "object" and .type == "duplicate_file") ]
+           | group_by(.checksum)
+           | map( { t: [ .[] | select(.path | startswith($prefix)) | .path[($prefix | length):] ],
+                    r: [ .[] | select(.path | startswith($prefix) | not) | .path ] } )
+           | map(select((.t | length) > 0 and (.r | length) > 0))
+           | map( .r[0] as $ref | .t | map({t: ., r: $ref}) )
+           | add // []) as $pairs
+
+        # majority vote: where did this directory’s matched files land?
+        | ($pairs
+           | map({tdir: (.t | dirof), rdir: (.r | dirof)})
+           | group_by(.tdir)
+           | map({ key: .[0].tdir,
+                   value: ( (group_by(.rdir) | max_by(length)) as $win
+                            | { dest: $win[0].rdir, votes: ($win | length), total: length } ) })
+           | from_entries) as $dirmap
+
+        | def resolve:
+            . as $dir
+            | ([ ($dir | ancestor_chain)[] | select($dirmap[.] != null) ] | .[0]) as $hit
+            | if $hit == null then
+                { dest: ($default_ref + (if $dir == "." then "" else "/" + $dir end)),
+                  reason: "mirrored — no matched file anywhere above it",
+                  confidence: 0 }
+              else
+                $dirmap[$hit] as $m
+                | (if $hit == $dir then ""
+                   elif $hit == "." then $dir
+                   else $dir[($hit | length) + 1:] end) as $suffix
+                | { dest: ($m.dest + (if $suffix == "" then "" else "/" + $suffix end)),
+                    reason: (if $hit == $dir
+                             then "siblings \($m.votes)/\($m.total)"
+                             else "inherited from \(if $hit == "." then "./" else $hit + "/" end) (siblings \($m.votes)/\($m.total))"
+                             end),
+                    confidence: (($m.votes / $m.total) * (if $hit == $dir then 1 else 0.7 end)) }
+              end;
+
+        ( $r.unmatched
+          | map( . as $rel
+                 | ($rel | dirof | resolve) as $res
+                 | ($res.dest + "/" + ($rel | basename)) as $dest
+                 | { path: $rel,
+                     destination: $dest,
+                     occupied: ($refset[$dest] != null),
+                     reason: (if $refset[$dest] != null
+                              then "same name already in the reference, with different content"
+                              else $res.reason end),
+                     confidence: (if $refset[$dest] != null then 1 else $res.confidence end) } ) ) as $sug
+
+        # two unmatched files resolving onto the same destination
+        | ($sug | group_by(.destination)
+           | map(select(length > 1) | .[].destination) | unique) as $collisions
+        | $sug | map(. + { collision: (.destination as $d | $collisions | index($d) != null) })
+        ' > "$suggest_json" || die "failed to compute placement suggestions."
+else
+    printf '[]\n' > "$suggest_json"
+fi
+
+if [[ -n $suggest_json_path ]]; then
+    cp "$suggest_json" "$suggest_json_path" \
+        || die "cannot write --suggest-json file '$suggest_json_path'."
+fi
+
+# A reviewable script, in the spirit of rmlint's own rmlint.sh: salvage
+# writes it, you read it, you run it. Anything risky is emitted commented out.
+if [[ -n $plan_path ]]; then
+    jq -r \
+        --slurpfile sug "$suggest_json" \
+        --arg target "$target" \
+        --arg version "$VERSION" \
+        --arg generated "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        --argjson refs "$(to_json_array "${abs_references[@]}")" \
+        -n '
+        def shq: "'\''" + (gsub("'\''"; "'\''\\'\'''\''")) + "'\''";
+        def dirof: rindex("/") as $i | if $i == null then "." else .[0:$i] end;
+
+        ($sug[0] // []) as $s
+        | "#!/bin/sh",
+          "#",
+          "# Placement plan generated by salvage \($version) on \($generated).",
+          "#",
+          "# target:     \($target)",
+          ($refs[] | "# reference:  \(.)"),
+          "#",
+          "# salvage did not copy anything. Read this, then run it.",
+          "# Copies, never moves: rerunning is safe, and the target is left",
+          "# intact so you can verify with a second salvage run before deleting.",
+          "#",
+          "# Lines that would overwrite an existing reference file, or that",
+          "# collide with another suggestion, are commented out deliberately.",
+          "",
+          "set -eu",
+          "",
+          ( $s[]
+            | "# \(.path)",
+              "#   \(.reason)"
+                + (if .confidence > 0 and .confidence < 1
+                   then " · confidence \((.confidence * 100 | floor))%" else "" end),
+              ( if .occupied or .collision then
+                  (if .occupied
+                   then "#   WOULD OVERWRITE an existing file — compare them first."
+                   else "#   COLLIDES with another suggested file of the same name." end),
+                  "# mkdir -p \(.destination | dirof | shq)",
+                  "# cp -p \(($target + "/" + .path) | shq) \(.destination | shq)"
+                else
+                  "mkdir -p \(.destination | dirof | shq)",
+                  "cp -p \(($target + "/" + .path) | shq) \(.destination | shq)"
+                end ),
+              "" ),
+          "echo \"plan complete — rerun salvage to verify coverage\""
+        ' > "$plan_path" || die "cannot write --plan file '$plan_path'."
+    chmod +x "$plan_path" 2>/dev/null || true
+fi
+
 if ! $opt_quiet; then
     refs_json=$(to_json_array "${abs_references[@]}")
     jq -rn \
@@ -510,6 +689,9 @@ if ! $opt_quiet; then
         --argjson newlines "$newline_paths" \
         --argjson rich "$use_color" \
         --argjson elapsed "$elapsed" \
+        --slurpfile sug "$suggest_json" \
+        --argjson show_suggest "$opt_suggest" \
+        --arg plan_path "$plan_path" \
         --arg reset "$C_RESET" --arg bold "$C_BOLD" --arg dim "$C_DIM" \
         --arg red "$C_RED" --arg green "$C_GREEN" --arg yellow "$C_YELLOW" \
         '
@@ -627,6 +809,28 @@ if ! $opt_quiet; then
                 | ( $top | map(.size | human | length) | max ) as $tw
                 | "", "  \($dim)largest at risk\($reset)",
                   ( $top[] | "    " + (.size | human | lpad($tw)) + "  " + (.path | link) ) )
+            else empty end )
+
+        , ( if ($show_suggest and $n_unmatched > 0) then
+              (($sug[0] // [])) as $s
+              | ($s | map(.path | length) | max // 0) as $pw
+              | "", "  \($dim)suggested placement\($reset)",
+                ( $s[]
+                  | "    " + (.path | rpad($pw)) + "  →  "
+                    + (if .occupied or .collision then $yellow else "" end)
+                    + .destination
+                    + (if .occupied or .collision then $reset else "" end),
+                  "    " + ("" | rpad($pw)) + "     \($dim)\(.reason)"
+                    + (if .confidence > 0 and .confidence < 1
+                       then " · confidence \((.confidence * 100 | floor))%" else "" end)
+                    + "\($reset)"
+                    + (if .occupied then "  \($yellow)⚠ would overwrite\($reset)"
+                       elif .collision then "  \($yellow)⚠ collides with another suggestion\($reset)"
+                       else "" end) )
+            else empty end )
+
+        , ( if $plan_path != "" then
+              "", "  \($dim)plan written to \($plan_path) — review it, then run it\($reset)"
             else empty end )
 
         , ( if $n_unmatched == 0 then empty

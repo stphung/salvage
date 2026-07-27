@@ -72,6 +72,25 @@ The two coverage meters (by file count, by bytes) are the point of the header: t
 diverge precisely in the case that matters, where many small files were copied and
 the large ones missed.
 
+### Placement suggestions (`--suggest`, `--plan`)
+
+A sixth stage, run only when asked. The key idea: rmlint groups a target file with
+its reference twin **by `checksum`**, so every match already reveals where that
+directory's contents live in the reference. A `target_dir → reference_dir` map is
+learned by majority vote over matched files, then applied to the unmatched ones —
+no filename heuristics for the common case, and a reorganised backup is followed
+rather than mirrored. Unmapped directories inherit from the nearest mapped ancestor
+(reduced confidence); with nothing above them, the layout is mirrored (zero).
+
+This needs a **reference inventory** (`find` over each reference, paths only). rmlint's
+JSON lists reference files that matched *something* and never the rest of the tree, so
+it cannot tell you a destination is already occupied. That check is what catches the
+same-name-different-content case, which is a modified file rather than a new one and
+must never be copied over silently.
+
+`--plan` writes a shell script and does not run it — the report-only invariant holds.
+Overwrites and collisions are emitted commented out.
+
 ### Invariants that must not be broken
 
 **Stream contract.** stdout carries the manifest — relative paths, one per line,

@@ -724,6 +724,131 @@ expect_not_contains "34m largest-at-risk omitted for short lists" "largest at ri
 teardown
 }
 
+# 35. Placement suggestions. The directory mapping is *learned* from where
+#     matched files landed, so a reference that was reorganised is followed
+#     rather than mirrored.
+test_35_placement_suggestions() {
+setup
+refabs=$(cd -- "$ref" && pwd -P)
+
+# the reference keeps src/ under a differently named directory
+mkdir -p "$target/src" "$ref/lib"
+printf 'shared code' > "$target/src/known.rs"
+printf 'shared code' > "$ref/lib/known.rs"
+printf 'brand new'   > "$target/src/new.rs"
+run "$target" -r "$ref" --suggest-json "$work/s.json"
+expect_eq "35a destination is learned, not mirrored" \
+    "$refabs/lib/new.rs" "$(jq -r '.[] | select(.path=="src/new.rs") | .destination' "$work/s.json")"
+expect_contains "35b reason cites the sibling vote" "siblings" \
+    "$(jq -r '.[] | select(.path=="src/new.rs") | .reason' "$work/s.json")"
+expect_eq "35c a unanimous vote is full confidence" "1" \
+    "$(jq -r '.[] | select(.path=="src/new.rs") | .confidence' "$work/s.json")"
+
+# a subtree with no matched file inherits from the nearest mapped ancestor
+mkdir -p "$target/src/deep/deeper"
+printf 'orphan' > "$target/src/deep/deeper/lost.rs"
+run "$target" -r "$ref" --suggest-json "$work/s2.json"
+expect_eq "35d unmatched subtree inherits its ancestor's mapping" \
+    "$refabs/lib/deep/deeper/lost.rs" \
+    "$(jq -r '.[] | select(.path|endswith("lost.rs")) | .destination' "$work/s2.json")"
+expect_contains "35e inheritance is stated as such" "inherited from" \
+    "$(jq -r '.[] | select(.path|endswith("lost.rs")) | .reason' "$work/s2.json")"
+expect_eq "35f inherited placement is less confident" "true" \
+    "$(jq -r '.[] | select(.path|endswith("lost.rs")) | .confidence < 1' "$work/s2.json")"
+teardown
+
+# nothing matched anywhere: mirror the target layout, and say so
+setup
+refabs=$(cd -- "$ref" && pwd -P)
+mkdir -p "$target/a/b"
+printf 'nothing in common' > "$target/a/b/x.txt"
+run "$target" -r "$ref" --suggest-json "$work/s.json"
+expect_eq "35g with no signal the layout is mirrored" \
+    "$refabs/a/b/x.txt" "$(jq -r '.[0].destination' "$work/s.json")"
+expect_contains "35h and the absence of signal is stated" "mirrored" \
+    "$(jq -r '.[0].reason' "$work/s.json")"
+expect_eq "35i mirrored placement has no confidence" "0" "$(jq -r '.[0].confidence' "$work/s.json")"
+teardown
+
+# same name, different content — the overwrite case
+setup
+printf 'version two' > "$target/notes.txt"
+printf 'version one' > "$ref/notes.txt"
+printf 'anchor' > "$target/anchor"
+printf 'anchor' > "$ref/anchor"
+run "$target" -r "$ref" --suggest-json "$work/s.json" --plan "$work/plan.sh"
+expect_eq "35j occupied destination is detected" "true" \
+    "$(jq -r '.[] | select(.path=="notes.txt") | .occupied' "$work/s.json")"
+expect_contains "35k and named as an overwrite risk" "different content" \
+    "$(jq -r '.[] | select(.path=="notes.txt") | .reason' "$work/s.json")"
+expect_contains "35l the plan warns about it" "WOULD OVERWRITE" "$(cat "$work/plan.sh")"
+if grep -qE "^cp .*notes\.txt" "$work/plan.sh"; then
+    no "35m the plan does not copy over it" "an active cp line was emitted for notes.txt"
+else
+    ok "35m the plan does not copy over it"
+fi
+teardown
+
+# Two unmatched files landing on the same destination. This needs two
+# distinct target directories that both map onto one reference directory —
+# which is what a flattened backup looks like.
+setup
+mkdir -p "$target/one" "$target/two"
+printf 'anchor one' > "$target/one/a1"; printf 'anchor one' > "$ref/a1"
+printf 'anchor two' > "$target/two/a2"; printf 'anchor two' > "$ref/a2"
+printf 'first'  > "$target/one/dup.txt"
+printf 'second' > "$target/two/dup.txt"
+run "$target" -r "$ref" --suggest-json "$work/s.json" --plan "$work/plan.sh"
+expect_eq "35n collisions are detected" "2" \
+    "$(jq -r '[.[] | select(.collision)] | length' "$work/s.json")"
+expect_contains "35o the plan flags the collision" "COLLIDES" "$(cat "$work/plan.sh")"
+teardown
+
+# the plan is a real script, and salvage does not run it
+setup
+printf 'anchor' > "$target/anchor"; printf 'anchor' > "$ref/anchor"
+printf 'new file' > "$target/fresh.txt"
+before=$(find "$ref" -type f | wc -l | tr -d ' ')
+run "$target" -r "$ref" --plan "$work/plan.sh"
+after=$(find "$ref" -type f | wc -l | tr -d ' ')
+expect_eq "35p salvage does not touch the reference" "$before" "$after"
+if sh -n "$work/plan.sh" 2>/dev/null; then ok "35q the plan is valid sh"
+else no "35q the plan is valid sh" "sh -n rejected it"; fi
+expect_contains "35r the report points at the plan" "plan written to" "$err"
+
+# running it achieves coverage — the end-to-end claim
+sh "$work/plan.sh" >/dev/null 2>&1
+run "$target" -r "$ref"
+expect_status "35s running the plan achieves full coverage" 0
+expect_eq "35t and nothing is left unmatched" "" "$out"
+teardown
+
+# suggestions are opt-in, and pointless when everything is covered
+setup
+printf 'covered' > "$target/a"; printf 'covered' > "$ref/b"
+run "$target" -r "$ref" --suggest
+expect_not_contains "35u no suggestions when fully covered" "suggested placement" "$err"
+printf 'missing' > "$target/c"
+run "$target" -r "$ref"
+expect_not_contains "35v suggestions are off by default" "suggested placement" "$err"
+run "$target" -r "$ref" --suggest
+expect_contains "35w --suggest turns them on" "suggested placement" "$err"
+teardown
+
+# with several references, placement follows whichever one the siblings used
+setup
+ref2="$work/ref2"; mkdir -p "$ref2/archive"
+mkdir -p "$target/photos"
+printf 'photo one' > "$target/photos/p1.jpg"
+printf 'photo one' > "$ref2/archive/p1.jpg"
+printf 'photo two' > "$target/photos/p2.jpg"
+run "$target" -r "$ref" -r "$ref2" --suggest-json "$work/s.json"
+expect_eq "35x placement follows the reference the siblings landed in" \
+    "$(cd -- "$ref2" && pwd -P)/archive/p2.jpg" \
+    "$(jq -r '.[] | select(.path|endswith("p2.jpg")) | .destination' "$work/s.json")"
+teardown
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
