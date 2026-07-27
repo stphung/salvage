@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+#
+# salvage — list the files in TARGET whose content is not present in any
+# REFERENCE. Matching is by content (checksum), so names, paths and directory
+# structure are irrelevant on both sides.
+#
+# Report-only: salvage never writes to, moves, or deletes your data.
+#
+# Exit codes:
+#   0  every file in TARGET has a content match in a REFERENCE
+#   1  ran successfully; some files have no match
+#   2  error (usage, missing dependency, bad input, I/O failure, interrupt)
+
+set -euo pipefail
+
+VERSION="1.0.0"
+RMLINT_MIN_MAJOR=2
+RMLINT_MIN_MINOR=10
+
+PROG=${0##*/}
+
+# ---------------------------------------------------------------------------
+# Default exclusions: OS-generated bookkeeping that is regenerated
+# automatically and carries no user data. Hidden *user* files are included.
+# ---------------------------------------------------------------------------
+DEFAULT_BASENAME_GLOBS=(
+    ".DS_Store"
+    "._*"
+    "Thumbs.db"
+    "desktop.ini"
+    ".apdisk"
+    ".localized"
+)
+DEFAULT_DIR_GLOBS=(
+    ".Spotlight-V100"
+    ".fseventsd"
+    ".Trashes"
+    ".TemporaryItems"
+    ".DocumentRevisions-V100"
+    "\$RECYCLE.BIN"
+    "System Volume Information"
+    ".Trash-*"
+)
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+target=""
+references=()
+user_excludes=()
+opt_absolute=false
+opt_print0=false
+opt_all=false
+opt_rollup=true
+opt_paranoid=false
+opt_default_excludes=true
+opt_hidden=true
+opt_verbose=false
+opt_quiet=false
+opt_color=auto
+json_path=""
+save_scan_path=""
+
+LIST_THRESHOLD=50
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit 2; }
+
+usage_short() {
+    cat >&2 <<EOF
+usage: $PROG [OPTIONS] TARGET -r REFERENCE [-r REFERENCE ...]
+try '$PROG --help' for the full list of options.
+EOF
+}
+
+usage_full() {
+    cat <<EOF
+$PROG $VERSION — find files in TARGET that are not present in any REFERENCE.
+
+Matching is by file content. Names, paths and directory layout are ignored
+on both sides. $PROG only reports; it never copies, moves or deletes.
+
+USAGE
+  $PROG [OPTIONS] TARGET -r REFERENCE [-r REFERENCE ...]
+
+  TARGET must be a directory, given as the first positional argument.
+  At least one REFERENCE is required. Bare positional references are
+  rejected so a mistyped path can never silently become a reference.
+  TARGET and REFERENCE trees may not overlap.
+
+OUTPUT
+  stdout   the unmatched paths, one per line, relative to TARGET, sorted.
+           Directly usable as: rsync -av --files-from=LIST TARGET/ DEST/
+  stderr   the human report: header, counts, per-directory rollup, footnotes.
+
+EXIT CODES
+  0  every file in TARGET has a content match      1  some files have none
+  2  error: usage, missing dependency, bad input, I/O failure, interrupt
+
+OPTIONS
+  -r, --reference DIR     Reference tree to search. Repeatable.
+      --absolute          Emit absolute paths instead of relative to TARGET.
+      --print0            NUL-delimit stdout instead of newlines.
+      --all               Always print the full file list on stderr.
+      --no-rollup         Omit the per-directory summary.
+  -p, --paranoid          Byte-for-byte comparison instead of blake2b.
+      --exclude GLOB      Additional exclusion. Repeatable. A glob with no
+                          '/' matches basenames; otherwise the relative path.
+      --no-default-excludes
+                          Do not exclude OS metadata (.DS_Store, .Spotlight-V100,
+                          .fseventsd, Thumbs.db, \$RECYCLE.BIN, ...).
+      --exclude-hidden    Skip dotfiles and dot-directories entirely.
+      --json PATH         Write a structured report to PATH.
+      --save-scan PATH    Save the raw rmlint JSON for 'rmlint --replay'.
+  -v, --verbose           Pass rmlint's own output through.
+  -q, --quiet             Suppress progress and the header.
+      --no-color          Disable colour. NO_COLOR is also honoured.
+  -h, --help              This text.
+      --version           Version of $PROG, rmlint and jq.
+
+NOTES
+  Hidden files are compared. Empty files and symlinks are not — neither can
+  carry data you could lose — and both are reported in a footnote.
+
+EXAMPLES
+  $PROG ./old-drive -r ./backup
+  $PROG /Volumes/Old -r /Volumes/BackupA -r /Volumes/BackupB
+  $PROG ./old -r ./backup > manifest.txt
+  rsync -av --files-from=manifest.txt ./old/ ./rescued/
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -r|--reference)
+            [[ $# -ge 2 ]] || die "option '$1' requires a directory"
+            references+=("$2"); shift 2 ;;
+        --reference=*)  references+=("${1#*=}"); shift ;;
+        --exclude)
+            [[ $# -ge 2 ]] || die "option '$1' requires a glob"
+            user_excludes+=("$2"); shift 2 ;;
+        --exclude=*)    user_excludes+=("${1#*=}"); shift ;;
+        --json)
+            [[ $# -ge 2 ]] || die "option '$1' requires a path"
+            json_path=$2; shift 2 ;;
+        --json=*)       json_path=${1#*=}; shift ;;
+        --save-scan)
+            [[ $# -ge 2 ]] || die "option '$1' requires a path"
+            save_scan_path=$2; shift 2 ;;
+        --save-scan=*)  save_scan_path=${1#*=}; shift ;;
+        --absolute)     opt_absolute=true; shift ;;
+        --print0)       opt_print0=true; shift ;;
+        --all)          opt_all=true; shift ;;
+        --no-rollup)    opt_rollup=false; shift ;;
+        -p|--paranoid)  opt_paranoid=true; shift ;;
+        --no-default-excludes) opt_default_excludes=false; shift ;;
+        --exclude-hidden)      opt_hidden=false; shift ;;
+        -v|--verbose)   opt_verbose=true; shift ;;
+        -q|--quiet)     opt_quiet=true; shift ;;
+        --no-color)     opt_color=never; shift ;;
+        -h|--help)      usage_full; exit 0 ;;
+        --version)
+            printf '%s %s\n' "$PROG" "$VERSION"
+            if command -v rmlint >/dev/null 2>&1; then
+                printf 'rmlint %s\n' "$(rmlint --version 2>&1 | sed -n 's/^version \([0-9.]*\).*/\1/p' | head -1)"
+            else
+                printf 'rmlint not found\n'
+            fi
+            if command -v jq >/dev/null 2>&1; then
+                printf 'jq %s\n' "$(jq --version 2>&1 | sed 's/^jq-//')"
+            else
+                printf 'jq not found\n'
+            fi
+            exit 0 ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                [[ -z $target ]] || die "unexpected argument '$1' — references must be given with -r/--reference"
+                target=$1; shift
+            done ;;
+        -*)
+            printf '%s: unknown option '\''%s'\''\n' "$PROG" "$1" >&2
+            usage_short; exit 2 ;;
+        *)
+            if [[ -z $target ]]; then
+                target=$1
+            else
+                printf '%s: unexpected argument '\''%s'\''\n' "$PROG" "$1" >&2
+                printf '        references must be given with -r/--reference\n' >&2
+                printf '        try: %s %s -r %s\n' "$PROG" "$target" "$1" >&2
+                exit 2
+            fi
+            shift ;;
+    esac
+done
+
+[[ -n $target ]] || { printf '%s: no TARGET given\n' "$PROG" >&2; usage_short; exit 2; }
+[[ ${#references[@]} -gt 0 ]] || {
+    printf '%s: at least one reference is required (-r DIR)\n' "$PROG" >&2
+    usage_short; exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+for cmd in rmlint jq; do
+    command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed."
+done
+
+rmlint_version=$(rmlint --version 2>&1 | sed -n 's/^version \([0-9][0-9.]*\).*/\1/p' | head -1)
+[[ -n $rmlint_version ]] || die "could not determine the rmlint version."
+rm_major=${rmlint_version%%.*}
+rm_rest=${rmlint_version#*.}
+rm_minor=${rm_rest%%.*}
+if [[ $rm_major -lt $RMLINT_MIN_MAJOR ]] ||
+   { [[ $rm_major -eq $RMLINT_MIN_MAJOR ]] && [[ $rm_minor -lt $RMLINT_MIN_MINOR ]]; }; then
+    die "rmlint >= $RMLINT_MIN_MAJOR.$RMLINT_MIN_MINOR is required (found $rmlint_version).
+        salvage depends on --keep-all-tagged, --must-match-tagged and the JSON output schema."
+fi
+
+[[ -d $target ]] || die "target '$target' is not a directory."
+[[ -r $target ]] || die "target '$target' is not readable."
+target=$(cd -- "$target" && pwd -P) || die "cannot resolve target '$target'."
+
+abs_references=()
+for ref in "${references[@]}"; do
+    [[ -d $ref ]] || die "reference '$ref' is not a directory."
+    [[ -r $ref ]] || die "reference '$ref' is not readable."
+    abs_references+=("$(cd -- "$ref" && pwd -P)")
+done
+
+# Overlap makes the report a lie: rmlint will not call a file a duplicate of
+# itself, so every file in the shared subtree is reported as unmatched.
+for ref in "${abs_references[@]}"; do
+    if [[ $target == "$ref" ]]; then
+        die "target and reference are the same directory: '$target'"
+    elif [[ $target == "$ref"/* ]]; then
+        die "target '$target' is inside reference '$ref'.
+        Overlapping trees produce a false report; give disjoint paths."
+    elif [[ $ref == "$target"/* ]]; then
+        die "reference '$ref' is inside target '$target'.
+        Overlapping trees produce a false report; give disjoint paths."
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Colour
+# ---------------------------------------------------------------------------
+use_color=false
+if [[ $opt_color == auto ]] && [[ -t 2 ]] && [[ -z ${NO_COLOR:-} ]]; then
+    use_color=true
+fi
+if $use_color; then
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_RED=$'\033[31m';  C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+else
+    C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""
+fi
+
+# ---------------------------------------------------------------------------
+# Workspace
+# ---------------------------------------------------------------------------
+workdir=$(mktemp -d) || die "cannot create a temporary directory."
+interrupted=false
+cleanup() { rm -rf "$workdir"; }
+on_signal() { interrupted=true; cleanup; printf '\n%s: interrupted\n' "$PROG" >&2; exit 2; }
+trap cleanup EXIT
+trap on_signal INT TERM
+
+scan_json="$workdir/rmlint.json"
+rmlint_err="$workdir/rmlint.err"
+inventory="$workdir/inventory.z"
+result_json="$workdir/result.json"
+unmatched_rel="$workdir/unmatched.z"
+unmatched_stat="$workdir/unmatched-stat.z"
+sizes_file="$workdir/sizes.txt"
+
+# ---------------------------------------------------------------------------
+# Glob -> anchored regex. '**' crosses '/', '*' and '?' do not.
+# ---------------------------------------------------------------------------
+glob_to_regex() {
+    local g=$1 out="" c i n
+    n=${#g}
+    i=0
+    while [[ $i -lt $n ]]; do
+        c=${g:$i:1}
+        case $c in
+            '*')
+                if [[ ${g:$((i+1)):1} == '*' ]]; then
+                    out="$out.*"; i=$((i+2)); continue
+                fi
+                out="$out[^/]*" ;;
+            '?')  out="$out[^/]" ;;
+            '.'|'^'|'$'|'+'|'('|')'|'['|']'|'{'|'}'|'|'|'\\')
+                  out="$out\\$c" ;;
+            *)    out="$out$c" ;;
+        esac
+        i=$((i+1))
+    done
+    printf '^%s$' "$out"
+}
+
+to_json_array() {
+    if [[ $# -eq 0 ]]; then printf '[]'; return; fi
+    printf '%s\0' "$@" | jq -Rs 'split("\u0000") | map(select(length > 0))'
+}
+
+basename_res=()
+dir_res=()
+path_res=()
+
+if $opt_default_excludes; then
+    for g in "${DEFAULT_BASENAME_GLOBS[@]}"; do basename_res+=("$(glob_to_regex "$g")"); done
+    for g in "${DEFAULT_DIR_GLOBS[@]}";      do dir_res+=("$(glob_to_regex "$g")"); done
+fi
+for g in ${user_excludes[@]+"${user_excludes[@]}"}; do
+    if [[ $g == */* ]]; then
+        path_res+=("$(glob_to_regex "$g")")
+    else
+        basename_res+=("$(glob_to_regex "$g")")
+    fi
+done
+
+json_basename_res=$(to_json_array ${basename_res[@]+"${basename_res[@]}"})
+json_dir_res=$(to_json_array ${dir_res[@]+"${dir_res[@]}"})
+json_path_res=$(to_json_array ${path_res[@]+"${path_res[@]}"})
+
+# ---------------------------------------------------------------------------
+# Scan
+# ---------------------------------------------------------------------------
+rmlint_args=("$target" "//")
+for ref in "${abs_references[@]}"; do rmlint_args+=("$ref"); done
+rmlint_args+=(--keep-all-tagged --must-match-tagged)
+$opt_hidden   && rmlint_args+=(--hidden)
+$opt_paranoid && rmlint_args+=(--paranoid)
+rmlint_args+=(-o "json:$scan_json")
+
+show_progress=false
+if [[ -t 2 ]] && ! $opt_quiet && ! $opt_verbose; then
+    show_progress=true
+    rmlint_args+=(-o progressbar)
+fi
+
+if $opt_paranoid; then method="paranoid (byte-for-byte)"; else method="blake2b"; fi
+
+rmlint_status=0
+if $opt_verbose; then
+    rmlint "${rmlint_args[@]}" -v 1>&2 || rmlint_status=$?
+elif $show_progress; then
+    rmlint "${rmlint_args[@]}" -VVV 1>&2 2>"$rmlint_err" || rmlint_status=$?
+else
+    rmlint "${rmlint_args[@]}" -VVV 1>/dev/null 2>"$rmlint_err" || rmlint_status=$?
+fi
+
+if [[ $rmlint_status -ne 0 ]]; then
+    printf '%s: rmlint failed (exit %d)\n' "$PROG" "$rmlint_status" >&2
+    [[ -s $rmlint_err ]] && cat "$rmlint_err" >&2
+    exit 2
+fi
+[[ -s $scan_json ]] || die "rmlint produced no output; cannot verify coverage."
+
+if [[ -n $save_scan_path ]]; then
+    cp "$scan_json" "$save_scan_path" || die "cannot write --save-scan file '$save_scan_path'."
+fi
+
+# ---------------------------------------------------------------------------
+# Inventory. Run from inside the target so every path is relative; this also
+# keeps the './' prefix, which protects paths beginning with '-'.
+# ---------------------------------------------------------------------------
+find_args=(. -type f ! -empty)
+$opt_hidden || find_args+=(! -path '*/.*')
+
+find_status=0
+( cd -- "$target" && find "${find_args[@]}" -print0 ) > "$inventory" 2>"$workdir/find.err" || find_status=$?
+if [[ $find_status -ne 0 ]]; then
+    printf '%s: could not read the whole target tree — coverage cannot be verified.\n' "$PROG" >&2
+    [[ -s $workdir/find.err ]] && sed "s/^/        /" "$workdir/find.err" >&2
+    exit 2
+fi
+if [[ -s $workdir/find.err ]]; then
+    printf '%s: some files under the target could not be read — coverage cannot be verified.\n' "$PROG" >&2
+    sed "s/^/        /" "$workdir/find.err" >&2
+    exit 2
+fi
+
+count_nuls() { LC_ALL=C tr -dc '\0' < "$1" | LC_ALL=C wc -c | tr -d ' '; }
+
+empty_count=$( ( cd -- "$target" && find . -type f -empty -print0 ) 2>/dev/null | LC_ALL=C tr -dc '\0' | LC_ALL=C wc -c | tr -d ' ' )
+symlink_count=$( ( cd -- "$target" && find . -type l -print0 ) 2>/dev/null | LC_ALL=C tr -dc '\0' | LC_ALL=C wc -c | tr -d ' ' )
+
+# ---------------------------------------------------------------------------
+# Set difference and per-directory totals, all inside jq: NUL-safe, no
+# locale-dependent sort/comm, no line-based fragility.
+# ---------------------------------------------------------------------------
+jq -n \
+    --rawfile inv "$inventory" \
+    --slurpfile rmlint "$scan_json" \
+    --arg prefix "$target/" \
+    --argjson basere "$json_basename_res" \
+    --argjson dirre "$json_dir_res" \
+    --argjson pathre "$json_path_res" \
+    '
+    def stripdot: if startswith("./") then .[2:] else . end;
+    def dirof: rindex("/") as $i | if $i == null then "." else .[0:$i] end;
+
+    ($inv | split("\u0000") | map(select(length > 0) | stripdot)) as $all
+    | ([ $rmlint[0][]
+         | select(type == "object" and .type == "duplicate_file")
+         | .path
+         | select(startswith($prefix))
+         | .[($prefix | length):]
+       ] | map({key: ., value: true}) | from_entries) as $matched
+    | ($all | map(select(
+          . as $path
+          | ($path | split("/")) as $parts
+          | ($parts | last) as $base
+          | ( (any($basere[];  . as $re | ($base | test($re))))
+              or (any($dirre[]; . as $re | any($parts[0:-1][]; test($re))))
+              or (any($pathre[]; . as $re | ($path | test($re)))) )
+          | not))) as $considered
+    | ($considered | map(select($matched[.] == null)) | sort) as $unmatched
+    | {
+        total_found: ($all | length),
+        excluded:    (($all | length) - ($considered | length)),
+        considered:  ($considered | length),
+        matched:     (($considered | length) - ($unmatched | length)),
+        unmatched:   $unmatched,
+        dirtotals:   ($considered | group_by(dirof)
+                      | map({key: (.[0] | dirof), value: length}) | from_entries)
+      }
+    ' > "$result_json" || die "failed to compute the difference."
+
+jq -j '.unmatched | if length == 0 then "" else (join("\u0000") + "\u0000") end' \
+    "$result_json" > "$unmatched_rel"
+jq -j '.unmatched | if length == 0 then "" else (map("./" + .) | join("\u0000") + "\u0000") end' \
+    "$result_json" > "$unmatched_stat"
+
+unmatched_count=$(jq -r '.unmatched | length' "$result_json")
+
+# ---------------------------------------------------------------------------
+# Sizes for the unmatched set only. xargs preserves argument order, so the
+# emitted sizes zip back onto the path list; a count mismatch (a file changed
+# under us) degrades to a sizeless report rather than a wrong one.
+# ---------------------------------------------------------------------------
+have_sizes=false
+if [[ $unmatched_count -gt 0 ]]; then
+    if ( cd -- "$target" && xargs -0 stat -f '%z' ) < "$unmatched_stat" > "$sizes_file" 2>/dev/null; then
+        size_lines=$(LC_ALL=C wc -l < "$sizes_file" | tr -d ' ')
+        [[ $size_lines -eq $unmatched_count ]] && have_sizes=true
+    fi
+fi
+$have_sizes || : > "$sizes_file"
+
+# ---------------------------------------------------------------------------
+# stdout: the manifest, and nothing else.
+# ---------------------------------------------------------------------------
+if [[ $unmatched_count -gt 0 ]]; then
+    if $opt_absolute; then
+        jq -j --arg p "$target/" \
+            '.unmatched | map($p + .) | join("\u0000") + "\u0000"' "$result_json" > "$workdir/out.z"
+    else
+        cp "$unmatched_rel" "$workdir/out.z"
+    fi
+    if $opt_print0; then
+        cat "$workdir/out.z"
+    else
+        LC_ALL=C tr '\0' '\n' < "$workdir/out.z"
+    fi
+fi
+
+newline_paths=$(jq -r '[.unmatched[] | select(test("\n"))] | length' "$result_json")
+
+# ---------------------------------------------------------------------------
+# stderr: the human report.
+# ---------------------------------------------------------------------------
+if ! $opt_quiet; then
+    refs_json=$(to_json_array "${abs_references[@]}")
+    jq -rn \
+        --slurpfile res "$result_json" \
+        --rawfile sizes "$sizes_file" \
+        --argjson have_sizes "$have_sizes" \
+        --argjson refs "$refs_json" \
+        --arg target "$target" \
+        --arg method "$method" \
+        --argjson empty "${empty_count:-0}" \
+        --argjson symlinks "${symlink_count:-0}" \
+        --argjson threshold "$LIST_THRESHOLD" \
+        --argjson show_all "$opt_all" \
+        --argjson rollup "$opt_rollup" \
+        --argjson newlines "$newline_paths" \
+        --arg reset "$C_RESET" --arg bold "$C_BOLD" --arg dim "$C_DIM" \
+        --arg red "$C_RED" --arg green "$C_GREEN" --arg yellow "$C_YELLOW" \
+        '
+        def commafy:
+          tostring as $s | ($s | length) as $n
+          | [range(0; $n)]
+          | map($s[.:.+1] + (if (($n - . - 1) % 3 == 0 and . < $n - 1) then "," else "" end))
+          | join("");
+        def human:
+          . as $b
+          | if   $b < 1024       then "\($b) B"
+            elif $b < 1048576    then "\(($b / 1024 * 10 | round) / 10) KB"
+            elif $b < 1073741824 then "\(($b / 1048576 * 10 | round) / 10) MB"
+            else                      "\(($b / 1073741824 * 100 | round) / 100) GB" end;
+        def lpad($w): tostring | if length < $w then (" " * ($w - length)) + . else . end;
+        def rpad($w): tostring | if length < $w then . + (" " * ($w - length)) else . end;
+        def dirof: rindex("/") as $i | if $i == null then "." else .[0:$i] end;
+
+        $res[0] as $r
+        | (if $have_sizes
+           then ($sizes | split("\n") | map(select(length > 0) | tonumber))
+           else [] end) as $sz
+        | ($r.unmatched
+           | to_entries
+           | map({path: .value, size: (if $have_sizes then $sz[.key] else 0 end)})) as $items
+        | ($items | map(.size) | add // 0) as $total_bytes
+
+        | "\($bold)target:\($reset)     \($target)"
+        , ( $refs | to_entries[]
+            | if .key == 0 then "\($bold)references:\($reset) \(.value)"
+              else "            \(.value)" end )
+        , "\($dim)comparison: \($method)\($reset)"
+        , ""
+
+        , ( if $r.unmatched | length | . == 0 then
+              ( if $r.considered == 0 then
+                  "\($yellow)No files to compare.\($reset)"
+                else
+                  "\($green)All \($r.considered | commafy) files in the target have a content match.\($reset)"
+                end )
+            else
+              "\($red)\($bold)\($r.unmatched | length | commafy) of \($r.considered | commafy) files have no content match\($reset)"
+              + (if $have_sizes then " — \($total_bytes | human)" else "" end)
+            end )
+
+        , ( if ($rollup and (($r.unmatched | length) > 0)) then
+              ( ( $items
+                  | group_by(.path | dirof)
+                  | map({ dir:   (.[0].path | dirof),
+                          n:     length,
+                          bytes: (map(.size) | add // 0) })
+                  | map(. + { total: ($r.dirtotals[.dir] // .n) })
+                  | sort_by(if $have_sizes then -.bytes else 0 end, .dir) ) as $rows
+                | ( $rows | map((.dir | if . == "." then "./" else . + "/" end) | length) | max ) as $w
+                | ( $rows | map("\(.n | commafy)/\(.total | commafy) files" | length) | max ) as $cw
+                | ( $rows | map(.bytes | human | length) | max ) as $bw
+                | "",
+                  ( $rows[]
+                    | "  "
+                      + ((.dir | if . == "." then "./" else . + "/" end) | rpad($w))
+                      + "  " + ("\(.n | commafy)/\(.total | commafy) files" | lpad($cw))
+                      + (if $have_sizes then "  " + (.bytes | human | lpad($bw)) else "" end)
+                      + (if .n == .total then "  \($yellow)← nothing matched\($reset)" else "" end) ) )
+            else empty end )
+
+        , ( if ($r.unmatched | length) == 0 then empty
+            elif ($show_all or (($r.unmatched | length) <= $threshold)) then
+              "", ($r.unmatched[] | "  " + .)
+            else
+              "", "  \($dim)(full list on stdout — \($r.unmatched | length | commafy) paths; --all to print here)\($reset)"
+            end )
+
+        , ( [ (if $empty > 0 then "\($empty | commafy) empty file\(if $empty == 1 then "" else "s" end)" else empty end),
+              (if $symlinks > 0 then "\($symlinks | commafy) symlink\(if $symlinks == 1 then "" else "s" end)" else empty end) ]
+            | if length > 0 then "", "  \($dim)(\(join(" and ")) not compared)\($reset)" else empty end )
+
+        , ( if $r.excluded > 0 then
+              "  \($dim)(\($r.excluded | commafy) OS metadata file\(if $r.excluded == 1 then "" else "s" end) excluded; --no-default-excludes to include)\($reset)"
+            else empty end )
+
+        , ( if ($have_sizes | not) and (($r.unmatched | length) > 0) then
+              "  \($yellow)(sizes unavailable — files changed during the scan)\($reset)"
+            else empty end )
+
+        , ( if $newlines > 0 then
+              "  \($yellow)warning: \($newlines | commafy) path\(if $newlines == 1 then "" else "s" end) contain a newline;"
+              + " the newline-delimited manifest on stdout is ambiguous. Use --print0.\($reset)"
+            else empty end )
+        , ""
+        ' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Structured report
+# ---------------------------------------------------------------------------
+if [[ -n $json_path ]]; then
+    jq -n \
+        --slurpfile res "$result_json" \
+        --rawfile sizes "$sizes_file" \
+        --argjson have_sizes "$have_sizes" \
+        --argjson refs "$(to_json_array "${abs_references[@]}")" \
+        --arg target "$target" \
+        --arg method "$method" \
+        --arg version "$VERSION" \
+        --arg generated "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        --argjson empty "${empty_count:-0}" \
+        --argjson symlinks "${symlink_count:-0}" \
+        '
+        $res[0] as $r
+        | (if $have_sizes then ($sizes | split("\n") | map(select(length > 0) | tonumber)) else [] end) as $sz
+        | {
+            salvage_version: $version,
+            generated:       $generated,
+            target:          $target,
+            references:      $refs,
+            comparison:      $method,
+            counts: {
+              found:      $r.total_found,
+              excluded:   $r.excluded,
+              compared:   $r.considered,
+              matched:    $r.matched,
+              unmatched:  ($r.unmatched | length),
+              empty:      $empty,
+              symlinks:   $symlinks
+            },
+            bytes_at_risk: (if $have_sizes then ($sz | add // 0) else null end),
+            unmatched: ($r.unmatched | to_entries
+                        | map({ path: .value,
+                                size: (if $have_sizes then $sz[.key] else null end) }))
+          }
+        ' > "$json_path" || die "cannot write --json file '$json_path'."
+fi
+
+[[ $unmatched_count -eq 0 ]] && exit 0
+exit 1

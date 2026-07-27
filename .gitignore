@@ -1,0 +1,13 @@
+.DS_Store
+._*
+
+# rmlint's default droppings, in case it is ever run by hand in here
+rmlint.json
+rmlint.sh
+rmlint.replay.json
+
+# scratch output from salvage runs
+*.manifest
+manifest*.txt
+scan*.json
+report*.json
