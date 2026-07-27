@@ -587,6 +587,52 @@ expect_not_contains "31c --no-color is clean too" "$esc" "$err"
 teardown
 
 # ---------------------------------------------------------------------------
+# 33. stat(1) portability. The size probe is exercised here against a shim
+#     rather than against the host, so the GNU branch is covered on a BSD
+#     machine and vice versa. The shims compute sizes with wc so they work
+#     on either platform.
+# ---------------------------------------------------------------------------
+setup
+shim="$work/shim"; mkdir -p "$shim"
+
+# GNU-like: -c '%s' works, -f is --file-system and fails on a format string
+cat > "$shim/stat" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "-c" ] && [ "$2" = "%s" ]; then
+    shift 2
+    for f in "$@"; do wc -c < "$f" | tr -d ' '; done
+    exit 0
+fi
+echo "stat: cannot read file system information" >&2
+exit 1
+SHIM
+chmod +x "$shim/stat"
+
+printf 'twelve bytes' > "$target/a"
+printf 'seven!!' > "$target/b"
+PATH="$shim:$PATH" "$SALVAGE" "$target" -r "$ref" --json "$work/gnu.json" >/dev/null 2>"$work/err"
+status=$?; err=$(cat "$work/err")
+expect_status "33a runs with a GNU-style stat" 1
+expect_eq "33b GNU-style stat yields correct sizes" "19" "$(jq -r '.bytes_at_risk' "$work/gnu.json")"
+expect_not_contains "33c and does not claim sizes are unavailable" "sizes unavailable" "$err"
+
+# stat unusable entirely: the verdict must survive, only the sizes drop
+cat > "$shim/stat" <<'SHIM'
+#!/bin/sh
+echo "stat: unavailable" >&2
+exit 1
+SHIM
+chmod +x "$shim/stat"
+out=$(PATH="$shim:$PATH" "$SALVAGE" "$target" -r "$ref" --json "$work/nostat.json" 2>"$work/err")
+status=$?; err=$(cat "$work/err")
+expect_status "33d unusable stat does not change the verdict" 1
+expect_eq "33e unusable stat still lists every file" "a
+b" "$out"
+expect_eq "33f unusable stat reports sizes as unknown" "null" "$(jq -r '.bytes_at_risk' "$work/nostat.json")"
+expect_contains "33g and says so on stderr" "sizes unavailable" "$err"
+teardown
+
+# ---------------------------------------------------------------------------
 # 32. Optional lint
 # ---------------------------------------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then

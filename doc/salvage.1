@@ -1,0 +1,272 @@
+.TH SALVAGE 1 "2026-07-26" "salvage 1.0.0" "User Commands"
+.SH NAME
+salvage \- list files whose content is not present in a reference tree
+.SH SYNOPSIS
+.B salvage
+[\fIOPTIONS\fR]
+.I TARGET
+.B \-r
+.I REFERENCE
+[\fB\-r\fR \fIREFERENCE\fR ...]
+.SH DESCRIPTION
+.B salvage
+answers one question: if you delete
+.IR TARGET ,
+what do you lose?
+.PP
+Every file under
+.I TARGET
+is checked for matching content in one or more
+.I REFERENCE
+trees. Matching is by checksum, so a file that was renamed, moved, or
+reorganised still counts as present. Names, paths and directory layout are
+irrelevant on both sides.
+.PP
+.B salvage
+only reports. It never copies, moves, or deletes anything. The list it writes
+to standard output is intended to be handed to
+.BR rsync (1)
+if you want the files rescued.
+.PP
+.I TARGET
+is the first positional argument. References are given with
+.B \-r
+and may be repeated; a file counts as matched if its content appears in
+.I any
+of them. Bare positional references are rejected, so a mistyped path cannot
+silently become a reference and make coverage look better than it is.
+.PP
+.I TARGET
+and
+.I REFERENCE
+trees may not overlap.
+.BR rmlint (1)
+will not call a file a duplicate of itself, so an overlapping run would report
+every file as unmatched;
+.B salvage
+refuses to run rather than produce that answer.
+.SH OUTPUT
+.B salvage
+writes to two streams, so one run serves both a reader and a pipeline.
+.TP
+.B stdout
+The manifest: unmatched paths, one per line, relative to
+.IR TARGET ,
+sorted. Nothing else \(em no header, no counts. Relative paths are the default
+because that is the form
+.B rsync \-\-files\-from
+requires.
+.TP
+.B stderr
+The human report: header, totals, a per\-directory rollup sorted by size, and
+footnotes. A progress bar is shown while scanning if stderr is a terminal.
+.SH OPTIONS
+.TP
+.BR \-r ", " \-\-reference " " \fIDIR\fR
+Reference tree to search. Repeatable. At least one is required.
+.TP
+.B \-\-absolute
+Emit absolute paths instead of paths relative to
+.IR TARGET .
+Note that these are resolved paths, so symlinked parents appear in their
+canonical form.
+.TP
+.B \-\-print0
+Delimit stdout with NUL instead of newline. Use this for
+.B xargs \-0
+and whenever a filename may contain a newline.
+.TP
+.B \-\-all
+Print the full file list on stderr regardless of its length. Without it, lists
+longer than 50 entries are summarised on stderr; stdout is always complete.
+.TP
+.B \-\-no\-rollup
+Omit the per\-directory summary.
+.TP
+.BR \-p ", " \-\-paranoid
+Compare byte for byte instead of hashing with blake2b. Uses noticeably more
+memory. See
+.B HASHING
+below.
+.TP
+.BI \-\-exclude " GLOB"
+Exclude matching files. Repeatable. A glob containing no
+.B /
+is matched against basenames at any depth; otherwise it is matched against the
+path relative to
+.IR TARGET .
+.B *
+and
+.B ?
+do not cross
+.BR / ;
+.B **
+does.
+.TP
+.B \-\-no\-default\-excludes
+Do not exclude OS metadata. See
+.B WHAT IS COMPARED
+below.
+.TP
+.B \-\-exclude\-hidden
+Skip dotfiles and dot\-directories entirely.
+.TP
+.BI \-\-json " PATH"
+Write a structured report to
+.IR PATH :
+counts, bytes at risk, and every unmatched file with its size. Diff two of
+these over time to see what became newly unbacked.
+.TP
+.BI \-\-save\-scan " PATH"
+Save the raw
+.BR rmlint (1)
+JSON, which
+.B rmlint \-\-replay
+can re\-process in seconds. Useful after a multi\-hour scan.
+.TP
+.BR \-v ", " \-\-verbose
+Pass rmlint's own output through.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the progress bar and the report. stdout is unaffected.
+.TP
+.B \-\-no\-color
+Disable colour.
+.B NO_COLOR
+in the environment does the same.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.TP
+.B \-\-version
+Print the versions of salvage, rmlint and jq. Include this in bug reports;
+behaviour differences almost always trace to rmlint.
+.SH EXIT STATUS
+.TP
+.B 0
+Every file in
+.I TARGET
+has a content match.
+.TP
+.B 1
+Some files have no match.
+.TP
+.B 2
+Error: usage, missing dependency, bad input, an unreadable file, or interrupt.
+.PP
+An unreadable file is always
+.BR 2 ,
+never
+.BR 0 .
+A permissions error must not be able to masquerade as a clean bill of health.
+.PP
+Because
+.B 1
+is a normal outcome rather than a failure, a caller running under
+.B set \-e
+must write
+.B salvage ... || true
+or test the status explicitly. This follows
+.BR diff (1)
+and
+.BR grep (1).
+.SH WHAT IS COMPARED
+.TP
+.B Hidden files are compared.
+.IR .env ", " .gitignore ", " .git/
+and everything like them. They are your data.
+.TP
+.B Empty files and symlinks are not.
+Neither carries content that can be lost. Both are counted in a footnote so
+the omission is never silent.
+.TP
+.B OS bookkeeping is excluded by default.
+.IR .DS_Store ", " ._* ", " .Spotlight\-V100 ", " .fseventsd ", " .Trashes ,
+.IR .TemporaryItems ", " .DocumentRevisions\-V100 ", " Thumbs.db ,
+.IR desktop.ini ", " $RECYCLE.BIN ", " "System Volume Information" ", " .Trash\-* .
+This is regenerated automatically and would otherwise bury the files you care
+about. The count is always reported.
+.B \-\-no\-default\-excludes
+turns it off.
+.PP
+The distinction is that hidden
+.I user data
+is included while filesystem
+.I scratch space
+is not.
+.SH HASHING
+The default is blake2b at 512 bits. A collision would produce a false
+.IR match \(em
+salvage reporting that a file is safely backed up when it is not \(em which is
+the only error mode here that loses data. At 512 bits a silent disk read error
+is many orders of magnitude more likely.
+.B \-\-paranoid
+performs true byte\-for\-byte comparison if you want it regardless. Whichever
+ran is printed in the report header, so a saved report records how it reached
+its verdict.
+.SH EXAMPLES
+Check one drive against two backups:
+.PP
+.RS
+.EX
+salvage /Volumes/Old \-r /Volumes/BackupA \-r /Volumes/BackupB
+.EE
+.RE
+.PP
+Produce a manifest and rescue the files with rsync:
+.PP
+.RS
+.EX
+salvage ./old\-drive \-r ./backup > manifest.txt
+rsync \-av \-\-files\-from=manifest.txt ./old\-drive/ ./rescued/
+.EE
+.RE
+.PP
+Use the exit status directly:
+.PP
+.RS
+.EX
+salvage ./old\-drive \-r ./backup >/dev/null && echo "fully covered"
+.EE
+.RE
+.PP
+Ignore build output and logs:
+.PP
+.RS
+.EX
+salvage ./project \-r ./backup \-\-exclude 'node_modules/**' \-\-exclude '*.log'
+.EE
+.RE
+.PP
+Safe against any filename:
+.PP
+.RS
+.EX
+salvage ./old \-r ./backup \-\-print0 | xargs \-0 \-n1 ls \-l
+.EE
+.RE
+.SH ENVIRONMENT
+.TP
+.B NO_COLOR
+If set, colour is disabled.
+.SH DEPENDENCIES
+.BR rmlint (1)
+version 2.10 or later, and
+.BR jq (1).
+Install both with
+.BR "brew install rmlint jq" .
+.PP
+salvage itself is a single self\-contained shell script targeting bash 3.2,
+the version macOS ships, and runs on both BSD and GNU userlands.
+.SH SEE ALSO
+.BR rmlint (1),
+.BR rsync (1),
+.BR jq (1),
+.BR diff (1)
+.SH BUGS
+A filename containing a newline cannot be expressed in the newline\-delimited
+manifest on stdout, and cannot be passed to
+.BR "rsync \-\-files\-from" .
+salvage detects this case and warns; use
+.B \-\-print0
+for a manifest that can represent it.

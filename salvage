@@ -274,6 +274,22 @@ unmatched_rel="$workdir/unmatched.z"
 unmatched_stat="$workdir/unmatched-stat.z"
 sizes_file="$workdir/sizes.txt"
 
+# stat(1) has no portable way to print a file size: BSD/macOS wants
+# -f '%z', GNU/coreutils wants -c '%s', and on GNU '-f' means --file-system.
+# Probe rather than sniff the OS, so busybox and unusual userlands land on
+# whichever form actually works. If neither does, the report degrades to
+# sizeless rather than wrong.
+stat_size_flag=""
+stat_size_fmt=""
+stat_probe="$workdir/.probe"
+printf '0123456789' > "$stat_probe"
+if [[ $(stat -f '%z' "$stat_probe" 2>/dev/null) == "10" ]]; then
+    stat_size_flag="-f"; stat_size_fmt="%z"
+elif [[ $(stat -c '%s' "$stat_probe" 2>/dev/null) == "10" ]]; then
+    stat_size_flag="-c"; stat_size_fmt="%s"
+fi
+rm -f "$stat_probe"
+
 # ---------------------------------------------------------------------------
 # Glob -> anchored regex. '**' crosses '/', '*' and '?' do not.
 # ---------------------------------------------------------------------------
@@ -442,8 +458,9 @@ unmatched_count=$(jq -r '.unmatched | length' "$result_json")
 # under us) degrades to a sizeless report rather than a wrong one.
 # ---------------------------------------------------------------------------
 have_sizes=false
-if [[ $unmatched_count -gt 0 ]]; then
-    if ( cd -- "$target" && xargs -0 stat -f '%z' ) < "$unmatched_stat" > "$sizes_file" 2>/dev/null; then
+if [[ $unmatched_count -gt 0 ]] && [[ -n $stat_size_flag ]]; then
+    if ( cd -- "$target" && xargs -0 stat "$stat_size_flag" "$stat_size_fmt" ) \
+            < "$unmatched_stat" > "$sizes_file" 2>/dev/null; then
         size_lines=$(LC_ALL=C wc -l < "$sizes_file" | tr -d ' ')
         [[ $size_lines -eq $unmatched_count ]] && have_sizes=true
     fi
@@ -568,7 +585,7 @@ if ! $opt_quiet; then
             else empty end )
 
         , ( if ($have_sizes | not) and (($r.unmatched | length) > 0) then
-              "  \($yellow)(sizes unavailable — files changed during the scan)\($reset)"
+              "  \($yellow)(sizes unavailable — stat is unusable, or files changed during the scan)\($reset)"
             else empty end )
 
         , ( if $newlines > 0 then

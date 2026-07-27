@@ -1,0 +1,26 @@
+#compdef salvage
+#
+# zsh completion for salvage
+
+_salvage() {
+    _arguments -s -S \
+        '(-h --help)'{-h,--help}'[show usage and exit]' \
+        '(- *)--version[show salvage, rmlint and jq versions]' \
+        \*{-r,--reference}'[reference tree to search (repeatable)]:reference directory:_files -/' \
+        \*--exclude'[exclude matching files (repeatable)]:glob:' \
+        '--absolute[emit absolute paths instead of relative to the target]' \
+        '--print0[NUL-delimit stdout instead of newlines]' \
+        '--all[always print the full list on stderr]' \
+        '--no-rollup[omit the per-directory summary]' \
+        '(-p --paranoid)'{-p,--paranoid}'[byte-for-byte comparison instead of blake2b]' \
+        '--no-default-excludes[include OS metadata such as .DS_Store]' \
+        '--exclude-hidden[skip dotfiles and dot-directories]' \
+        '--json[write a structured report]:report file:_files' \
+        '--save-scan[save the raw rmlint JSON for --replay]:scan file:_files' \
+        '(-v --verbose)'{-v,--verbose}'[pass rmlint output through]' \
+        '(-q --quiet)'{-q,--quiet}'[suppress progress and the report]' \
+        '--no-color[disable colour]' \
+        '1:target directory:_files -/'
+}
+
+_salvage "$@"
