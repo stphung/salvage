@@ -8,8 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 under a target tree whose content appears in no reference tree. Matching is by
 checksum, so renames and moves still count as matches.
 
-The whole tool is one file: `salvage`, ~640 lines of bash. Nothing is sourced. The
-repo directory is currently named `dupe-check` while the tool is named `salvage`.
+The whole tool is one file: `salvage`, ~640 lines of bash. Nothing is sourced.
 
 ## Commands
 
