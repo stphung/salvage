@@ -55,17 +55,28 @@ jobs:
         run: make demo
 
   lint:
-    # Advisory for now: shellcheck has never been run against this codebase,
-    # so making it blocking on day one would just paint CI red. Once the
-    # findings are triaged, drop the continue-on-error line below.
-    name: shellcheck (advisory)
+    # Blocking. The findings that existed when this was introduced have been
+    # fixed, so the codebase is clean at shellcheck's strictest level.
+    #
+    # This runs `make lint` rather than the tools directly, deliberately: the
+    # command, the file list and the severity are defined once, in the
+    # Makefile and .shellcheckrc, so what runs here cannot drift from what
+    # runs on a developer's machine.
+    #
+    # SKIP_MISSING is NOT set: if a tool fails to install, this job fails
+    # rather than silently checking nothing and reporting green.
+    name: static analysis
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install shellcheck
+      - name: Install shellcheck and actionlint
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-      - name: Lint
-        run: shellcheck -S warning salvage tests/run.sh
+          gh release download --repo rhysd/actionlint --pattern '*linux_amd64.tar.gz' \
+            --output - | sudo tar -xz -C /usr/local/bin actionlint
+          actionlint --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: make lint
+        run: make lint

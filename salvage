@@ -278,9 +278,8 @@ fi
 # Workspace
 # ---------------------------------------------------------------------------
 workdir=$(mktemp -d) || die "cannot create a temporary directory."
-interrupted=false
 cleanup() { rm -rf "$workdir"; }
-on_signal() { interrupted=true; cleanup; printf '\n%s: interrupted\n' "$PROG" >&2; exit 2; }
+on_signal() { cleanup; printf '\n%s: interrupted\n' "$PROG" >&2; exit 2; }
 trap cleanup EXIT
 trap on_signal INT TERM
 
@@ -317,13 +316,14 @@ glob_to_regex() {
     i=0
     while [[ $i -lt $n ]]; do
         c=${g:$i:1}
+        # shellcheck disable=SC1003  # the '\\' branch matches a literal backslash; it is not an escaped quote
         case $c in
             '*')
                 if [[ ${g:$((i+1)):1} == '*' ]]; then
                     out="$out.*"; i=$((i+2)); continue
                 fi
-                out="$out[^/]*" ;;
-            '?')  out="$out[^/]" ;;
+                out="${out}[^/]*" ;;
+            '?')  out="${out}[^/]" ;;
             '.'|'^'|'$'|'+'|'('|')'|'['|']'|'{'|'}'|'|'|'\\')
                   out="$out\\$c" ;;
             *)    out="$out$c" ;;
@@ -566,7 +566,7 @@ if $want_suggestions && [[ $unmatched_count -gt 0 ]]; then
            | map( .r[0] as $ref | .t | map({t: ., r: $ref}) )
            | add // []) as $pairs
 
-        # majority vote: where did this directory’s matched files land?
+        # majority vote: where did the matched files in this directory land?
         | ($pairs
            | map({tdir: (.t | dirof), rdir: (.r | dirof)})
            | group_by(.tdir)
@@ -623,6 +623,8 @@ fi
 
 # A reviewable script, in the spirit of rmlint's own rmlint.sh: salvage
 # writes it, you read it, you run it. Anything risky is emitted commented out.
+# shellcheck disable=SC1003  # the shq definition below embeds single quotes into a
+#                            # single-quoted jq program; that idiom is the only way
 if [[ -n $plan_path ]]; then
     jq -r \
         --slurpfile sug "$suggest_json" \

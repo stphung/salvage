@@ -1,0 +1,21 @@
+# ShellCheck configuration.
+#
+# Read automatically by shellcheck when run from the repository root, which
+# is how both `make lint` and CI invoke it — so local and CI results are
+# identical rather than merely similar.
+
+# Gate at `style`, the strictest level, not the default `warning`. Everything
+# below is clean at that level, so any new finding is a real regression.
+severity=style
+
+# SC2329 "this function is never invoked".
+#
+# Wrong for this codebase in two places, both by design:
+#   - salvage's cleanup()/on_signal() are invoked by `trap`, not by a call.
+#   - tests/run.sh dispatches test_NN_* functions dynamically, by name, from
+#     the list `declare -F` produces. That indirection is deliberate: it is
+#     what removes the registry that would otherwise drift out of date.
+#
+# Both are invisible to static analysis. Suppressed globally rather than with
+# 40-odd inline comments.
+disable=SC2329

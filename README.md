@@ -264,8 +264,28 @@ make test T="5 22"     # just those groups
 make test T="-k stat"  # groups whose name matches
 make list-tests        # what's available
 ./tests/run.sh -v      # show every passing assertion
-make lint              # shellcheck, if installed
+make lint              # static analysis — the exact command CI runs
+make lint-tools        # brew install shellcheck actionlint
 ```
+
+### Static analysis
+
+`make lint` is the only entry point, and CI invokes it verbatim. The file list lives
+in the `Makefile` and the severity and suppressions live in `.shellcheckrc`, so there
+is no command line to keep in sync between a laptop and a runner.
+
+- **`bash -n`** on every shell file — zero dependencies, always runs
+- **shellcheck** at `severity=style`, its strictest level, not the default `warning`
+- **actionlint** on the workflows
+
+A missing tool is an **error**, not a skip: a linter that quietly does nothing is
+worse than no linter, because CI stays green while checking less than you think.
+`make lint SKIP_MISSING=1` downgrades that to a warning when you genuinely want it.
+
+One suppression is configured, `SC2329` ("function never invoked"), which is wrong
+here in two places by design — `cleanup`/`on_signal` are reached through `trap`, and
+the test functions are dispatched by name from `declare -F`. Both are invisible to
+static analysis. The reasoning is written into `.shellcheckrc`.
 
 Fixtures are generated rather than committed: empty files, symlinks and
 newline-in-name files don't survive git or a zip faithfully, and the code that builds

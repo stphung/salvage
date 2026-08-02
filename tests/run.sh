@@ -661,17 +661,21 @@ teardown
 
 # 32. Optional lint
 test_32_optional_lint() {
+# No severity flag: .shellcheckrc supplies it, so this matches `make lint`
+# and CI exactly rather than approximately. `make lint` is the full gate and
+# additionally runs actionlint; this is the copy that rides along with the
+# suite so `make test` alone still notices.
 if command -v shellcheck >/dev/null 2>&1; then
     lint_out=$(mktemp)
-    shellcheck -S warning "$SALVAGE" "$0" >"$lint_out" 2>&1 || true
+    shellcheck "$SALVAGE" "$0" >"$lint_out" 2>&1 || true
     if [[ -s $lint_out ]]; then
-        no "32a shellcheck reports no warnings" "$(cat "$lint_out")"
+        no "32a shellcheck is clean" "$(cat "$lint_out")"
     else
-        ok "32a shellcheck reports no warnings"
+        ok "32a shellcheck is clean"
     fi
     rm -f "$lint_out"
 else
-    printf '%s  skip  32a shellcheck not installed%s\n' "$D" "$Z"
+    printf '%s  skip  32a shellcheck not installed (make lint-tools)%s\n' "$D" "$Z"
 fi
 }
 
@@ -882,11 +886,13 @@ if [[ -z ${selected// /} ]]; then
     exit 2
 fi
 
-total=$(printf '%s\n' $selected | grep -c .)
+# wc -w counts the tokens without relying on word splitting; function names
+# never contain whitespace, so this is exact.
+total=$(printf '%s' "$selected" | wc -w | tr -d ' ')
 if [[ -z $nums && -z $pattern ]]; then
     printf 'running salvage tests\n\n'
 else
-    printf 'running %d of %d groups\n\n' "$total" "$(printf '%s\n' $all_tests | grep -c .)"
+    printf 'running %d of %d groups\n\n' "$total" "$(printf '%s' "$all_tests" | wc -w | tr -d ' ')"
 fi
 
 for t in $selected; do
