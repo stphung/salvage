@@ -127,7 +127,7 @@ check-version: ## Verify the version agrees across the script and the man page
 
 dist: check-version ## Build a release tarball in dist/
 	@rm -rf dist && mkdir -p dist/salvage-$(VERSION)
-	@cp -R salvage README.md Makefile doc completions examples dist/salvage-$(VERSION)/
+	@cp -R salvage README.md LICENSE Makefile doc completions examples dist/salvage-$(VERSION)/
 	@tar -czf dist/salvage-$(VERSION).tar.gz -C dist salvage-$(VERSION)
 	@cp salvage dist/salvage
 	@rm -rf dist/salvage-$(VERSION)

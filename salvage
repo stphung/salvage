@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 RMLINT_MIN_MAJOR=2
 RMLINT_MIN_MINOR=10
 
