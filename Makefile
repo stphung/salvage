@@ -13,7 +13,7 @@ ZSHDIR   = $(DESTDIR)$(PREFIX)/share/zsh/site-functions
 BASHDIR  = $(DESTDIR)$(PREFIX)/share/bash-completion/completions
 
 .DEFAULT_GOAL := help
-.PHONY: help install uninstall link unlink test list-tests lint lint-tools deps demo check-version dist
+.PHONY: help install uninstall link unlink test list-tests lint lint-tools deps demo check-version dist hooks unhooks
 
 T ?=
 
@@ -97,6 +97,17 @@ lint: ## Static analysis — shellcheck + actionlint (exactly what CI runs)
 	if [ $$fail -eq 0 ]; then printf 'static analysis clean\n'; \
 	else printf 'static analysis FAILED\n' >&2; fi; \
 	exit $$fail
+
+# core.hooksPath is per-clone git config, not something a checkout can carry, so
+# this has to be run once per machine. The hooks themselves are committed.
+hooks: ## Enable the committed git hooks (once per clone)
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/*
+	@printf 'hooks enabled — pre-commit runs lint, pre-push runs the full suite\n'
+
+unhooks: ## Disable the committed git hooks
+	@git config --unset core.hooksPath || true
+	@printf 'hooks disabled\n'
 
 lint-tools: ## Install the static analysis tools
 	brew install shellcheck actionlint

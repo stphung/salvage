@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# Committed hook. Enable it in a fresh clone with:
+#
+#   make hooks
+#
+# Runs the fast half of CI — everything in the `static analysis` job, plus the
+# version check from the `test` job. The full suite runs at push time instead,
+# so committing stays quick.
+#
+# These are the same make targets CI invokes, not a copy of them. If CI's steps
+# change, change them in the Makefile and both move together.
+
+set -e
+
+printf '\033[1mpre-commit\033[0m — make check-version, make lint\n'
+
+make check-version
+make lint
+
+printf 'pre-commit ok\n'

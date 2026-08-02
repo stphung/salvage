@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# Committed hook. Enable it in a fresh clone with:
+#
+#   make hooks
+#
+# The last gate before code becomes public, so it runs everything CI runs —
+# including the static analysis the pre-commit hook already did. That repetition
+# is deliberate: a commit made with --no-verify would otherwise reach the remote
+# having been checked by nothing at all.
+#
+# What this CANNOT catch: a tool version difference between this machine and the
+# runner. Local shellcheck 0.11 and CI's older build disagree about which code a
+# finding gets (SC2329 vs SC2317), and that is what turned CI red once already.
+# The fix for that class lives in .shellcheckrc, not here.
+
+set -e
+
+printf '\033[1mpre-push\033[0m — make check-version, make lint, make test\n'
+
+make check-version
+make lint
+make test
+
+printf 'pre-push ok\n'
