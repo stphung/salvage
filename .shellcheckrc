@@ -19,3 +19,15 @@ severity=style
 # Both are invisible to static analysis. Suppressed globally rather than with
 # 40-odd inline comments.
 disable=SC2329
+
+# SC2317 "command appears to be unreachable" is the SAME finding as SC2329,
+# reported by older shellchecks — 0.9/0.10 flag every line inside a
+# dynamically dispatched function, where 0.11 flags the function once as
+# SC2329. Both codes must be disabled or the result depends on which
+# shellcheck happens to be installed.
+#
+# This is not hypothetical: it turned CI red on the commit that made linting
+# blocking. A laptop had 0.11 (clean) while the Ubuntu runner had an older
+# apt build (200+ SC2317 findings). Disabling only the code your local tool
+# emits is exactly the drift `make lint` exists to prevent.
+disable=SC2317
