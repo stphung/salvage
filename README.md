@@ -266,7 +266,27 @@ make list-tests        # what's available
 ./tests/run.sh -v      # show every passing assertion
 make lint              # static analysis — the exact command CI runs
 make lint-tools        # brew install shellcheck actionlint
+make hooks             # enable the committed git hooks (once per clone)
 ```
+
+### Git hooks
+
+The hooks are committed in `.githooks/`, but `core.hooksPath` is per-clone git config,
+so a fresh checkout needs one command:
+
+```sh
+make hooks             # make unhooks reverses it
+```
+
+- **pre-commit** — `make check-version` and `make lint`. The fast half, about a second.
+- **pre-push** — those plus `make test`. The last gate before code becomes public, so it
+  repeats the static analysis deliberately: a commit made with `--no-verify` would
+  otherwise reach the remote having been checked by nothing.
+
+They invoke the same make targets CI does rather than restating the commands, so the two
+cannot drift. What they **cannot** catch is a tool version difference between your machine
+and the runner — local shellcheck 0.11 and CI's older build disagree about which code a
+finding gets, which turned CI red once. That class is handled in `.shellcheckrc`, not here.
 
 ### Static analysis
 
